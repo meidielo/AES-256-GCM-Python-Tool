@@ -55,8 +55,6 @@ class SecureVault:
     MIN_KDF_P,   MAX_KDF_P   = 1, 16
 
     MAX_PAYLOAD_SIZE = 100 * 1024 * 1024    # 100 MiB hard limit
-    # Base64 inflates size by ~33%. Padding this to *2 accounts for JSON
-    # structural overhead and guarantees we catch memory exhaustion before json.loads.
     # Base64 inflates the 100 MiB ciphertext by ~33% (to ~133 MiB).
     # The * 2 multiplier (200 MiB) provides a generous ~67 MiB safety margin
     # for JSON structural overhead and metadata before rejecting the string.
