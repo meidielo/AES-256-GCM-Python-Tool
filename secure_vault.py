@@ -57,6 +57,9 @@ class SecureVault:
     MAX_PAYLOAD_SIZE = 100 * 1024 * 1024    # 100 MiB hard limit
     # Base64 inflates size by ~33%. Padding this to *2 accounts for JSON
     # structural overhead and guarantees we catch memory exhaustion before json.loads.
+    # Base64 inflates the 100 MiB ciphertext by ~33% (to ~133 MiB).
+    # The * 2 multiplier (200 MiB) provides a generous ~67 MiB safety margin
+    # for JSON structural overhead and metadata before rejecting the string.
     MAX_JSON_STRING_SIZE = MAX_PAYLOAD_SIZE * 2
 
     # MappingProxyType protects the inner dictionary from runtime mutation.
@@ -168,6 +171,10 @@ class SecureVault:
             # Preserve raw Base64 strings — used verbatim in AAD reconstruction
             salt_b64  = header["salt"]
             nonce_b64 = header["nonce"]
+
+            # Explicit type guard: non-string values would silently pass b64decode
+            if not isinstance(salt_b64, str) or not isinstance(nonce_b64, str):
+                raise TypeError("Salt and nonce must be strings.")
 
             salt  = base64.b64decode(salt_b64)
             nonce = base64.b64decode(nonce_b64)
