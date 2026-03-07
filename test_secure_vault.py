@@ -184,17 +184,27 @@ def test_oversized_json_rejected_before_parse_decrypt(vault, password):
 # ==========================================
 # We instantiate SecureVault locally to avoid pytest fixture scoping conflicts with hypothesis.
 @given(st.binary(min_size=1, max_size=10000))
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)  # deadline=None: Argon2 exceeds the 200ms default
 def test_roundtrip_arbitrary_bytes(data):
     """Fuzzes binary encryption with arbitrary byte arrays including null bytes."""
     vault = SecureVault()
     blob = vault.encrypt(data, "passphrase")
     assert vault.decrypt(blob, "passphrase", return_bytes=True) == data
 
-@given(st.text(min_size=1, max_size=10000))
-@settings(max_examples=100)
+@given(st.text(min_size=1, max_size=10000, alphabet=st.characters(exclude_categories=("Cs",))))
+@settings(max_examples=100, deadline=None)  # deadline=None: Argon2 exceeds the 200ms default
 def test_roundtrip_arbitrary_strings(text_data):
-    """Fuzzes string encryption with arbitrary unicode, surrogates, and control characters."""
+    """Fuzzes string encryption with arbitrary unicode and control characters (surrogates excluded).
+    st.text() excludes surrogates by default; the alphabet arg makes that contract explicit.
+    """
     vault = SecureVault()
     blob = vault.encrypt(text_data, "passphrase")
     assert vault.decrypt(blob, "passphrase") == text_data
+
+def test_surrogate_string_raises_cleanly(vault, password):
+    """Proves surrogate characters (U+D800-U+DFFF) fail at encode() before reaching crypto.
+    Constructed via chr() at runtime to avoid UnicodeEncodeError in pytest's assertion rewriter.
+    """
+    surrogate = chr(0xD800)
+    with pytest.raises((UnicodeEncodeError, ValueError)):
+        vault.encrypt(surrogate, password)
