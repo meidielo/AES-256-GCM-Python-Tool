@@ -16,18 +16,40 @@ class SecureVault:
     - Passphrase entropy is the caller's responsibility.
     - Large Plaintexts: This implementation loads the entire plaintext and
       ciphertext into RAM. It is not suitable for multi-gigabyte files,
-      which could cause an Out-Of-Memory (OOM) Denial of Service. Use
-      chunked streaming (e.g., via Tink or STREAM) for large files.
+      which could cause an Out-Of-Memory (OOM) Denial of Service.
     """
 
     # __slots__ prevents instance-level dictionary creation (e.g., self.x = 1).
-    # Note: It does NOT prevent class-attribute reassignment. If strict class
-    # immutability is required, a metaclass must be implemented.
     __slots__ = ()
 
-    SUPPORTED_VERSIONS = {"1.0", "2.0"}
+    # ==========================================
+    # AAD Registry & Versioning (Single Source of Truth)
+    # ==========================================
+    @staticmethod
+    def _build_aad_v1(ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
+        """Legacy v1.0 AAD excludes key_len to preserve hash identicality."""
+        del key_len  # v1.0 does not bind key_len; present for registry signature parity
+        return f"v=1.0;ops={ops};mem={mem};p={p};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
+
+    @staticmethod
+    def _build_aad_v2(ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
+        """v2.0 natively binds key_len to the cryptographic authentication tag."""
+        return f"v=2.0;ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
+
+    # The registry strictly couples supported versions to their implementations.
+    # Adding a new version here without a builder branch will surface immediately.
+    _AAD_BUILDERS = MappingProxyType({
+        "1.0": _build_aad_v1,
+        "2.0": _build_aad_v2,
+    })
+
+    # SUPPORTED_VERSIONS is derived from the registry — not maintained separately.
+    SUPPORTED_VERSIONS = frozenset(_AAD_BUILDERS.keys())
     CURRENT_VERSION = "2.0"
 
+    # ==========================================
+    # Cryptographic Boundaries & Configurations
+    # ==========================================
     MIN_KDF_OPS, MAX_KDF_OPS = 2, 10
     MIN_KDF_MEM, MAX_KDF_MEM = 32768, 262144
     MIN_KDF_P,   MAX_KDF_P   = 1, 16
@@ -51,29 +73,12 @@ class SecureVault:
         )
         return kdf.derive(passphrase.encode('utf-8'))
 
-    def _build_aad(self, v: str, ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
-        """
-        Constructs deterministic AAD using explicit, validated primitives.
-        This completely decouples AAD construction from the raw, untrusted JSON dict.
-        """
-        # Legacy v1.0 Compatibility: Excludes key_len to preserve hash identicality
-        if v == "1.0":
-            return f"v={v};ops={ops};mem={mem};p={p};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
-
-        # v2.0 Structure: Includes key_len in cryptographic binding
-        if v == "2.0":
-            return f"v={v};ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
-
-        # Fail-safe: If a developer adds "3.0" to SUPPORTED_VERSIONS but forgets
-        # to add the branch here, it raises an unmasked developer error.
-        raise NotImplementedError(f"Developer Error: AAD builder missing implementation for version {v}")
-
     def encrypt(self, plaintext: Union[str, bytes], passphrase: str) -> str:
         """Encrypts data and returns a structured JSON object with embedded KDF parameters."""
         # Security: passphrase entropy is the caller's responsibility.
         if not passphrase:
             raise ValueError("Passphrase cannot be empty.")
-        if not plaintext:  # Note: empty bytes b"" will intentionally trigger this. b"\x00" will pass.
+        if not plaintext:  # Note: empty bytes b"" intentionally triggers this. b"\x00" will pass.
             raise ValueError("Plaintext data cannot be empty.")
 
         # Handle binary vs string data explicitly
@@ -107,10 +112,11 @@ class SecureVault:
             "nonce": nonce_b64
         }
 
-        # 4. Build AAD (Additional Authenticated Data) from validated primitives
+        # 4. Look up the correct AAD builder from the registry and build AAD
         # Binding the version, salt, and KDF params to the ciphertext integrity
         # means any tampering with unencrypted metadata will fail the auth tag check.
-        aad = self._build_aad(self.CURRENT_VERSION, config["ops"], config["mem"], config["p"], config["key_len"], salt_b64, nonce_b64)
+        builder = self._AAD_BUILDERS[self.CURRENT_VERSION]
+        aad = builder(config["ops"], config["mem"], config["p"], config["key_len"], salt_b64, nonce_b64)
 
         # 5. Encrypt using AES-GCM — encrypt() returns: ciphertext + 16-byte auth tag
         aesgcm = AESGCM(key)
@@ -156,6 +162,9 @@ class SecureVault:
         if v not in self.SUPPORTED_VERSIONS:
             raise ValueError(f"Unsupported payload version: {v}")
 
+        if not isinstance(kdf_params, dict):
+            raise ValueError("KDF parameters must be a JSON object.")
+
         # Cryptographic field length checks
         if len(salt) != 16:
             raise ValueError(f"Invalid salt length: expected 16, got {len(salt)}.")
@@ -166,8 +175,10 @@ class SecureVault:
 
         # KDF boundary validations
         ops, mem, p = kdf_params.get("ops"), kdf_params.get("mem"), kdf_params.get("p")
-        if not (isinstance(ops, int) and isinstance(mem, int) and isinstance(p, int)):
-            raise ValueError("KDF parameters (ops, mem, p) must be integers.")
+
+        # Strict type check: type(x) is not int excludes booleans (isinstance(True, int) is True)
+        if type(ops) is not int or type(mem) is not int or type(p) is not int:
+            raise ValueError("KDF parameters (ops, mem, p) must be strict integers.")
 
         # Prevent Downgrade Attacks and Denial of Service (DoS)
         if not (self.MIN_KDF_OPS <= ops <= self.MAX_KDF_OPS):
@@ -182,15 +193,16 @@ class SecureVault:
             key_len = 32  # Implicit fallback for legacy payloads
         else:
             key_len = kdf_params.get("key_len")
-            if key_len not in {16, 24, 32}:
+            if type(key_len) is not int or key_len not in {16, 24, 32}:
                 raise ValueError("Invalid key_len: must be 16, 24, or 32.")
 
         # ==========================================
         # PHASE 2.5: AAD Construction
         # ==========================================
-        # Lifted out of Phase 3 to ensure developer desync errors (NotImplementedError)
+        # Lifted out of Phase 3 to ensure developer desync errors (missing builder)
         # crash loudly rather than getting masked by the generic Exception handler.
-        aad = self._build_aad(v, ops, mem, p, key_len, salt_b64, nonce_b64)
+        builder = self._AAD_BUILDERS[v]
+        aad = builder(ops, mem, p, key_len, salt_b64, nonce_b64)
 
         # ==========================================
         # PHASE 3: Cryptography
@@ -220,29 +232,31 @@ class SecureVault:
         except UnicodeDecodeError as e:
             raise RuntimeError("Decrypted data is not valid UTF-8. Use return_bytes=True to retrieve raw bytes.") from e
 
-# --- Example Usage ---
+# ==========================================
+# Smoke Tests & Usage Examples
+# ==========================================
 if __name__ == "__main__":
     vault = SecureVault()
-    secret_data = "Sensitive User Information: API_KEY_12345"
     password = "correct-horse-battery-staple"
 
-    # 1. Standard encrypt/decrypt flow (v2.0)
-    encrypted_packet = vault.encrypt(secret_data, password)
-    print(f"Encrypted Payload (JSON):\n{encrypted_packet[:100]}...\n")
+    print("--- 1. Standard String Encryption (v2.0) ---")
+    secret_text = "Highly confidential production data."
+    blob_v2 = vault.encrypt(secret_text, password)
+    print(f"Encrypted Blob: {blob_v2[:80]}...")
+    print(f"Decrypted Text: {vault.decrypt(blob_v2, password)}\n")
 
-    try:
-        decrypted_text = vault.decrypt(encrypted_packet, password)
-        print(f"Decrypted Result: {decrypted_text}")
-    except PermissionError as e:
-        print(e)
+    print("--- 2. Raw Bytes Encryption (v2.0) ---")
+    secret_bytes = b"\x00\xFF\x00\x11\x22\x33 Binary Payload"
+    blob_bytes = vault.encrypt(secret_bytes, password)
+    decrypted_bytes_result = vault.decrypt(blob_bytes, password, return_bytes=True)
+    print(f"Decrypted Bytes Match: {secret_bytes == decrypted_bytes_result}\n")
 
-    # 2. Demonstrate AAD Protection (Tampering with Metadata)
-    import json as _json
-    tampered_blob = _json.loads(encrypted_packet)
-    tampered_blob["header"]["v"] = "9.9"  # Modify unencrypted metadata
-    tampered_json = _json.dumps(tampered_blob)
+    print("--- 3. Legacy v1.0 Decryption Test ---")
+    # A mocked v1.0 payload representing data encrypted before key_len was added.
+    # We generate this by temporarily forcing the class into v1.0 mode.
+    SecureVault.CURRENT_VERSION = "1.0"
+    blob_v1 = vault.encrypt("Legacy data payload", password)
+    SecureVault.CURRENT_VERSION = "2.0"  # Restore
 
-    try:
-        vault.decrypt(tampered_json, password)
-    except (PermissionError, ValueError) as e:
-        print(f"Success: AAD detected metadata tampering — {e}")
+    print(f"Legacy Blob v1.0: {blob_v1[:80]}...")
+    print(f"Decrypted v1.0 Text: {vault.decrypt(blob_v1, password)}")
