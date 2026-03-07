@@ -3,7 +3,7 @@ import json
 import base64
 import binascii
 from types import MappingProxyType
-from typing import Dict, Any, Union
+from typing import Union
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.exceptions import InvalidTag
@@ -11,21 +11,28 @@ from cryptography.exceptions import InvalidTag
 class SecureVault:
     """
     A production-grade AES-GCM vault using Argon2id for key derivation.
+
+    Security Notes:
+    - Passphrase entropy is the caller's responsibility.
+    - Large Plaintexts: This implementation loads the entire plaintext and
+      ciphertext into RAM. It is not suitable for multi-gigabyte files,
+      which could cause an Out-Of-Memory (OOM) Denial of Service. Use
+      chunked streaming (e.g., via Tink or STREAM) for large files.
     """
 
-    # __slots__ prevents instance dictionary creation, freezing instance state.
+    # __slots__ prevents instance-level dictionary creation (e.g., self.x = 1).
+    # Note: It does NOT prevent class-attribute reassignment. If strict class
+    # immutability is required, a metaclass must be implemented.
     __slots__ = ()
 
     SUPPORTED_VERSIONS = {"1.0", "2.0"}
     CURRENT_VERSION = "2.0"
 
-    # Boundary Clamping for DoS and Downgrade Protection
     MIN_KDF_OPS, MAX_KDF_OPS = 2, 10
     MIN_KDF_MEM, MAX_KDF_MEM = 32768, 262144
     MIN_KDF_P,   MAX_KDF_P   = 1, 16
 
-    # MappingProxyType ensures the dictionary cannot be mutated at runtime
-    # (e.g., SecureVault.CURRENT_KDF_CONFIG["ops"] = 1 will raise TypeError)
+    # MappingProxyType protects the inner dictionary from runtime mutation.
     CURRENT_KDF_CONFIG = MappingProxyType({
         "ops": 3,       # Iterations (time_cost)
         "mem": 65536,   # 64MB RAM (memory_cost)
@@ -34,7 +41,7 @@ class SecureVault:
     })
 
     def _derive_key(self, passphrase: str, salt: bytes, ops: int, mem: int, p: int, key_len: int) -> bytes:
-        """Derives a key. No dictionary .get() fallbacks — strict args only."""
+        """Derives a key using Argon2id. No dictionary .get() fallbacks — strict args only."""
         kdf = Argon2id(
             salt=salt,
             length=key_len,
@@ -44,44 +51,29 @@ class SecureVault:
         )
         return kdf.derive(passphrase.encode('utf-8'))
 
-    def _build_aad(self, header: Dict[str, Any]) -> bytes:
+    def _build_aad(self, v: str, ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
         """
-        Constructs deterministic AAD, strictly isolating version structures.
-        Avoids json.dumps() to prevent byte-drift across Python versions or platforms.
+        Constructs deterministic AAD using explicit, validated primitives.
+        This completely decouples AAD construction from the raw, untrusted JSON dict.
         """
-        v = header['v']
-
         # Legacy v1.0 Compatibility: Excludes key_len to preserve hash identicality
         if v == "1.0":
-            return (
-                f"v={v};"
-                f"ops={header['kdf']['ops']};"
-                f"mem={header['kdf']['mem']};"
-                f"p={header['kdf']['p']};"
-                f"salt={header['salt']};"
-                f"nonce={header['nonce']}"
-            ).encode('ascii')
+            return f"v={v};ops={ops};mem={mem};p={p};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
         # v2.0 Structure: Includes key_len in cryptographic binding
         if v == "2.0":
-            return (
-                f"v={v};"
-                f"ops={header['kdf']['ops']};"
-                f"mem={header['kdf']['mem']};"
-                f"p={header['kdf']['p']};"
-                f"key_len={header['kdf']['key_len']};"
-                f"salt={header['salt']};"
-                f"nonce={header['nonce']}"
-            ).encode('ascii')
+            return f"v={v};ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
-        raise ValueError(f"Cannot build AAD for unsupported version: {v}")
+        # Fail-safe: If a developer adds "3.0" to SUPPORTED_VERSIONS but forgets
+        # to add the branch here, it raises an unmasked developer error.
+        raise NotImplementedError(f"Developer Error: AAD builder missing implementation for version {v}")
 
     def encrypt(self, plaintext: Union[str, bytes], passphrase: str) -> str:
         """Encrypts data and returns a structured JSON object with embedded KDF parameters."""
         # Security: passphrase entropy is the caller's responsibility.
         if not passphrase:
             raise ValueError("Passphrase cannot be empty.")
-        if not plaintext:
+        if not plaintext:  # Note: empty bytes b"" will intentionally trigger this. b"\x00" will pass.
             raise ValueError("Plaintext data cannot be empty.")
 
         # Handle binary vs string data explicitly
@@ -91,6 +83,10 @@ class SecureVault:
         salt = os.urandom(16)
         nonce = os.urandom(12)
         config = self.CURRENT_KDF_CONFIG
+
+        # Pre-encode to Base64 strings so both header and AAD use the identical value
+        salt_b64  = base64.b64encode(salt).decode('ascii')
+        nonce_b64 = base64.b64encode(nonce).decode('ascii')
 
         # 2. Derive key from passphrase using current KDF config
         # Parameters are explicitly passed; no dictionary .get() logic exists here.
@@ -107,14 +103,14 @@ class SecureVault:
                 "p": config["p"],
                 "key_len": config["key_len"]
             },
-            "salt": base64.b64encode(salt).decode('ascii'),
-            "nonce": base64.b64encode(nonce).decode('ascii')
+            "salt": salt_b64,
+            "nonce": nonce_b64
         }
 
-        # 4. Build AAD (Additional Authenticated Data) — deterministic canonical string
+        # 4. Build AAD (Additional Authenticated Data) from validated primitives
         # Binding the version, salt, and KDF params to the ciphertext integrity
         # means any tampering with unencrypted metadata will fail the auth tag check.
-        aad = self._build_aad(header)
+        aad = self._build_aad(self.CURRENT_VERSION, config["ops"], config["mem"], config["p"], config["key_len"], salt_b64, nonce_b64)
 
         # 5. Encrypt using AES-GCM — encrypt() returns: ciphertext + 16-byte auth tag
         aesgcm = AESGCM(key)
@@ -142,9 +138,14 @@ class SecureVault:
             full_packet = json.loads(encrypted_json)
             header = full_packet["header"]
             ciphertext_with_tag = base64.b64decode(full_packet["ciphertext"])
+
             kdf_params = header["kdf"]
-            salt = base64.b64decode(header["salt"])
-            nonce = base64.b64decode(header["nonce"])
+            # Preserve raw Base64 strings — used verbatim in AAD reconstruction
+            salt_b64  = header["salt"]
+            nonce_b64 = header["nonce"]
+
+            salt  = base64.b64decode(salt_b64)
+            nonce = base64.b64decode(nonce_b64)
         except (KeyError, json.JSONDecodeError, binascii.Error, TypeError) as e:
             raise ValueError(f"Decryption failed: Malformed payload structure. {e}") from e
 
@@ -185,10 +186,16 @@ class SecureVault:
                 raise ValueError("Invalid key_len: must be 16, 24, or 32.")
 
         # ==========================================
+        # PHASE 2.5: AAD Construction
+        # ==========================================
+        # Lifted out of Phase 3 to ensure developer desync errors (NotImplementedError)
+        # crash loudly rather than getting masked by the generic Exception handler.
+        aad = self._build_aad(v, ops, mem, p, key_len, salt_b64, nonce_b64)
+
+        # ==========================================
         # PHASE 3: Cryptography
         # ==========================================
         try:
-            aad = self._build_aad(header)
             # Parameters are explicitly passed; no dictionary .get() logic exists here.
             key = self._derive_key(passphrase, salt, ops, mem, p, key_len)
 
