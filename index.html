@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Secure Vault</title>
+  <script src="https://cdn.jsdelivr.net/npm/argon2-browser@1.18.0/dist/argon2-bundled.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      color: #1a1a2e;
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 40px 16px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      width: 100%;
+      max-width: 600px;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      padding: 28px 32px 24px;
+      color: #fff;
+    }
+    .header h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header h1 svg { opacity: 0.9; }
+    .header p {
+      margin-top: 6px;
+      font-size: 0.85rem;
+      opacity: 0.6;
+      line-height: 1.5;
+    }
+
+    /* ── Tabs ── */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #e8eaed;
+    }
+    .tab {
+      flex: 1;
+      padding: 14px;
+      border: none;
+      background: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #888;
+      cursor: pointer;
+      transition: color 0.15s, border-bottom 0.15s;
+      border-bottom: 3px solid transparent;
+      letter-spacing: 0.1px;
+    }
+    .tab:hover { color: #1a1a2e; }
+    .tab.active {
+      color: #1a1a2e;
+      border-bottom-color: #4f46e5;
+    }
+
+    /* ── Body ── */
+    .body { padding: 28px 32px 32px; }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #555;
+      margin-bottom: 6px;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+
+    textarea, input[type="password"], input[type="text"] {
+      width: 100%;
+      border: 1.5px solid #e0e3e8;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      color: #1a1a2e;
+      background: #fafbfc;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      outline: none;
+      resize: vertical;
+    }
+    textarea:focus, input:focus {
+      border-color: #4f46e5;
+      box-shadow: 0 0 0 3px rgba(79,70,229,0.1);
+      background: #fff;
+    }
+    textarea { min-height: 120px; line-height: 1.5; }
+    textarea.output {
+      font-family: "SF Mono", "Fira Code", Consolas, monospace;
+      font-size: 0.78rem;
+      background: #f8f9fa;
+      color: #444;
+      min-height: 100px;
+    }
+
+    .field { margin-bottom: 20px; }
+
+    /* ── Passphrase row ── */
+    .pass-row {
+      position: relative;
+    }
+    .pass-row input {
+      padding-right: 44px;
+    }
+    .toggle-vis {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: #888;
+      padding: 2px;
+      display: flex;
+      align-items: center;
+    }
+    .toggle-vis:hover { color: #4f46e5; }
+
+    /* ── Action button ── */
+    .btn {
+      width: 100%;
+      padding: 13px;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.1s, opacity 0.15s;
+      letter-spacing: 0.2px;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+    .btn-primary {
+      background: #4f46e5;
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) { background: #4338ca; }
+
+    /* ── Status ── */
+    .status {
+      display: none;
+      font-size: 0.82rem;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+    .status.error { background: #fef2f2; color: #b91c1c; display: block; }
+    .status.info  { background: #eff6ff; color: #1d4ed8; display: block; }
+
+    /* ── Output row ── */
+    .output-section { display: none; margin-top: 20px; }
+    .output-section.visible { display: block; }
+    .output-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .btn-copy {
+      background: none;
+      border: 1.5px solid #e0e3e8;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #555;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn-copy:hover { border-color: #4f46e5; color: #4f46e5; }
+    .btn-copy.copied { border-color: #16a34a; color: #16a34a; }
+
+    /* ── Spinner ── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      padding: 14px 32px;
+      border-top: 1px solid #f0f2f5;
+      font-size: 0.75rem;
+      color: #aaa;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .footer svg { flex-shrink: 0; }
+  </style>
+</head>
+<body>
+<div class="card">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      Secure Vault
+    </h1>
+    <p>AES-256-GCM encryption with Argon2id key derivation. Runs entirely in your browser — nothing is sent anywhere.</p>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('encrypt')">🔒 Encrypt</button>
+    <button class="tab" onclick="switchTab('decrypt')">🔓 Decrypt</button>
+  </div>
+
+  <!-- Body -->
+  <div class="body">
+
+    <!-- Encrypt panel -->
+    <div class="panel active" id="panel-encrypt">
+      <div class="field">
+        <label for="enc-text">Your message</label>
+        <textarea id="enc-text" placeholder="Type or paste the text you want to encrypt…"></textarea>
+      </div>
+      <div class="field">
+        <label for="enc-pass">Passphrase</label>
+        <div class="pass-row">
+          <input type="password" id="enc-pass" placeholder="Choose a strong passphrase">
+          <button class="toggle-vis" onclick="toggleVis('enc-pass', this)" aria-label="Show passphrase">
+            <svg id="eye-enc" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="status" id="enc-status"></div>
+      <button class="btn btn-primary" id="enc-btn" onclick="doEncrypt()">Encrypt</button>
+      <div class="output-section" id="enc-output">
+        <div class="output-header">
+          <label style="margin:0">Encrypted payload</label>
+          <button class="btn-copy" id="enc-copy" onclick="copyOutput('enc-result', this)">Copy</button>
+        </div>
+        <textarea class="output" id="enc-result" readonly></textarea>
+      </div>
+    </div>
+
+    <!-- Decrypt panel -->
+    <div class="panel" id="panel-decrypt">
+      <div class="field">
+        <label for="dec-text">Encrypted payload</label>
+        <textarea id="dec-text" placeholder="Paste the encrypted JSON blob here…"></textarea>
+      </div>
+      <div class="field">
+        <label for="dec-pass">Passphrase</label>
+        <div class="pass-row">
+          <input type="password" id="dec-pass" placeholder="Enter the passphrase used to encrypt">
+          <button class="toggle-vis" onclick="toggleVis('dec-pass', this)" aria-label="Show passphrase">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="status" id="dec-status"></div>
+      <button class="btn btn-primary" id="dec-btn" onclick="doDecrypt()">Decrypt</button>
+      <div class="output-section" id="dec-output">
+        <div class="output-header">
+          <label style="margin:0">Decrypted message</label>
+          <button class="btn-copy" id="dec-copy" onclick="copyOutput('dec-result', this)">Copy</button>
+        </div>
+        <textarea class="output" id="dec-result" readonly></textarea>
+      </div>
+    </div>
+
+  </div><!-- /body -->
+
+  <!-- Footer -->
+  <div class="footer">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    Encrypted payloads are compatible with the Python CLI tool.
+  </div>
+
+</div><!-- /card -->
+
+<script>
+// =====================================================================
+// UI helpers
+// =====================================================================
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', (i === 0) === (name === 'encrypt'));
+  });
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+function toggleVis(inputId, btn) {
+  const inp = document.getElementById(inputId);
+  const isHidden = inp.type === 'password';
+  inp.type = isHidden ? 'text' : 'password';
+  btn.querySelector('svg').style.opacity = isHidden ? '0.5' : '1';
+}
+
+function setStatus(id, msg, type) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'status ' + (type || '');
+}
+
+function setLoading(btnId, loading, label) {
+  const btn = document.getElementById(btnId);
+  btn.disabled = loading;
+  btn.innerHTML = loading
+    ? '<span class="spinner"></span>Deriving key…'
+    : label;
+}
+
+function showOutput(sectionId, resultId, text) {
+  document.getElementById(resultId).value = text;
+  document.getElementById(sectionId).classList.add('visible');
+}
+
+function copyOutput(resultId, btn) {
+  const text = document.getElementById(resultId).value;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+// =====================================================================
+// Crypto primitives
+// =====================================================================
+const KDF_CONFIG = { ops: 3, mem: 65536, p: 4, key_len: 32 };
+
+function toBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function fromBase64(str) {
+  return Uint8Array.from(atob(str), c => c.charCodeAt(0));
+}
+
+function buildAAD(version, ops, mem, p, key_len, salt_b64, nonce_b64) {
+  if (version === '1.0')
+    return `v=1.0;ops=${ops};mem=${mem};p=${p};salt=${salt_b64};nonce=${nonce_b64}`;
+  return `v=2.0;ops=${ops};mem=${mem};p=${p};key_len=${key_len};salt=${salt_b64};nonce=${nonce_b64}`;
+}
+
+async function deriveKey(passphrase, saltBytes, ops, mem, p, hashLen) {
+  const result = await argon2.hash({
+    pass: passphrase,
+    salt: saltBytes,
+    time: ops,
+    mem: mem,
+    hashLen: hashLen,
+    parallelism: p,
+    type: argon2.ArgonType.Argon2id,
+  });
+  return result.hash; // Uint8Array
+}
+
+async function encrypt(plaintext, passphrase) {
+  const salt  = crypto.getRandomValues(new Uint8Array(16));
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const cfg   = KDF_CONFIG;
+
+  const salt_b64  = toBase64(salt);
+  const nonce_b64 = toBase64(nonce);
+
+  const keyBytes = await deriveKey(passphrase, salt, cfg.ops, cfg.mem, cfg.p, cfg.key_len);
+  const aad      = new TextEncoder().encode(buildAAD('2.0', cfg.ops, cfg.mem, cfg.p, cfg.key_len, salt_b64, nonce_b64));
+
+  const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+  const ctBuffer  = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce, additionalData: aad, tagLength: 128 },
+    cryptoKey,
+    new TextEncoder().encode(plaintext)
+  );
+
+  return JSON.stringify({
+    header: {
+      v: '2.0',
+      kdf: { ops: cfg.ops, mem: cfg.mem, p: cfg.p, key_len: cfg.key_len },
+      salt: salt_b64,
+      nonce: nonce_b64,
+    },
+    ciphertext: toBase64(new Uint8Array(ctBuffer)),
+  });
+}
+
+async function decrypt(blob, passphrase) {
+  let packet;
+  try { packet = JSON.parse(blob); } catch { throw new Error('Not valid JSON. Paste the full encrypted payload.'); }
+
+  const { header, ciphertext: ct_b64 } = packet;
+  if (!header || !ct_b64) throw new Error('Malformed payload: missing header or ciphertext.');
+
+  const v = header.v;
+  if (!v || !['1.0', '2.0'].includes(v)) throw new Error(`Unsupported version: "${v}".`);
+
+  const kdf = header.kdf;
+  if (!kdf || typeof kdf !== 'object') throw new Error('Missing KDF parameters.');
+
+  const { ops, mem, p } = kdf;
+  if (!Number.isInteger(ops) || !Number.isInteger(mem) || !Number.isInteger(p))
+    throw new Error('KDF parameters must be integers.');
+  if (ops < 2 || ops > 10)        throw new Error('KDF ops value is outside allowed range.');
+  if (mem < 32768 || mem > 262144) throw new Error('KDF memory value is outside allowed range.');
+  if (p < 1 || p > 16)            throw new Error('KDF parallelism value is outside allowed range.');
+
+  let key_len;
+  if (v === '1.0') {
+    key_len = 32;
+  } else {
+    key_len = kdf.key_len;
+    if (![16, 24, 32].includes(key_len)) throw new Error('Invalid key_len in payload.');
+  }
+
+  const salt_b64  = header.salt;
+  const nonce_b64 = header.nonce;
+  if (typeof salt_b64 !== 'string' || typeof nonce_b64 !== 'string')
+    throw new Error('Salt and nonce must be strings.');
+
+  const salt             = fromBase64(salt_b64);
+  const nonce            = fromBase64(nonce_b64);
+  const ciphertextWithTag = fromBase64(ct_b64);
+
+  if (salt.length !== 16)          throw new Error('Invalid salt length.');
+  if (nonce.length !== 12)         throw new Error('Invalid nonce length.');
+  if (ciphertextWithTag.length < 16) throw new Error('Ciphertext too short to contain auth tag.');
+
+  const aad      = new TextEncoder().encode(buildAAD(v, ops, mem, p, key_len, salt_b64, nonce_b64));
+  const keyBytes = await deriveKey(passphrase, salt, ops, mem, p, key_len);
+  const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']);
+
+  let decrypted;
+  try {
+    decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: aad, tagLength: 128 },
+      cryptoKey,
+      ciphertextWithTag
+    );
+  } catch {
+    throw new Error('Decryption failed. Wrong passphrase or the payload has been tampered with.');
+  }
+
+  return new TextDecoder().decode(decrypted);
+}
+
+// =====================================================================
+// Button handlers
+// =====================================================================
+async function doEncrypt() {
+  const text = document.getElementById('enc-text').value.trim();
+  const pass = document.getElementById('enc-pass').value;
+
+  setStatus('enc-status', '', '');
+  document.getElementById('enc-output').classList.remove('visible');
+
+  if (!text) return setStatus('enc-status', 'Please enter a message to encrypt.', 'error');
+  if (!pass) return setStatus('enc-status', 'Please enter a passphrase.', 'error');
+
+  setLoading('enc-btn', true);
+  try {
+    const blob = await encrypt(text, pass);
+    showOutput('enc-output', 'enc-result', blob);
+    setStatus('enc-status', '', '');
+  } catch (e) {
+    setStatus('enc-status', e.message, 'error');
+  } finally {
+    setLoading('enc-btn', false, 'Encrypt');
+  }
+}
+
+async function doDecrypt() {
+  const blob = document.getElementById('dec-text').value.trim();
+  const pass = document.getElementById('dec-pass').value;
+
+  setStatus('dec-status', '', '');
+  document.getElementById('dec-output').classList.remove('visible');
+
+  if (!blob) return setStatus('dec-status', 'Please paste an encrypted payload.', 'error');
+  if (!pass) return setStatus('dec-status', 'Please enter the passphrase.', 'error');
+
+  setLoading('dec-btn', true);
+  try {
+    const plaintext = await decrypt(blob, pass);
+    showOutput('dec-output', 'dec-result', plaintext);
+    setStatus('dec-status', '', '');
+  } catch (e) {
+    setStatus('dec-status', e.message, 'error');
+  } finally {
+    setLoading('dec-btn', false, 'Decrypt');
+  }
+}
+</script>
+</body>
+</html>
