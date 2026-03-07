@@ -131,3 +131,10 @@ pytest test_secure_vault.py -v -k "not arbitrary"
 ```
 
 Coverage includes: roundtrip correctness, non-determinism verification, authentication/integrity failures, KDF boundary enforcement, type evasion guards, malformed payload rejection, OOM limits, MemoryError path, legacy v1.0 decryption, and property-based fuzzing with Hypothesis.
+
+## References
+
+- [OWASP Password Storage Cheat Sheet — Argon2id](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) — basis for KDF baseline claims
+- [NIST SP 800-38D — Recommendation for GCM Mode](https://csrc.nist.gov/publications/detail/sp/800-38d/final) — AES-GCM specification and 12-byte IV standard
+- [RFC 7516 — JSON Web Encryption (JWE)](https://www.rfc-editor.org/rfc/rfc7516) — the established envelope encryption pattern this design resembles
+- [cryptography library documentation](https://cryptography.io/en/latest/) — underlying implementation of AES-GCM and Argon2id
