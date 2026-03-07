@@ -14,8 +14,11 @@ class SecureVault:
 
     Security Notes:
     - Passphrase entropy is the caller's responsibility.
-    - OOM Protection: Payloads are capped at 100 MiB. Larger files require
-      chunked streaming (e.g., via Tink or STREAM ciphers).
+    - OOM Protection: Payloads are capped at 100 MiB.
+      Note: Peak RAM usage during encryption/decryption is roughly 3x the
+      payload size (~300 MiB) due to base64 encoding, intermediate string
+      allocation, and ciphertext byte arrays existing simultaneously.
+      Larger files require chunked streaming (e.g., via Tink or STREAM ciphers).
     """
 
     # __slots__ prevents instance-level dictionary creation (e.g., self.x = 1).
@@ -35,13 +38,11 @@ class SecureVault:
         """v2.0 natively binds key_len to the cryptographic authentication tag."""
         return f"v=2.0;ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
-    # Note: Because these functions are referenced here at class definition time,
-    # they are stored as unbound functions. When retrieved from this dict, they
-    # bypass the descriptor protocol and behave exactly like plain functions.
-    # DO NOT wrap them in staticmethod() here, or calling them will raise TypeError.
+    # Extracting .__func__ ensures cross-compatibility.
+    # Prior to Python 3.10, staticmethod objects were not directly callable.
     _AAD_BUILDERS = MappingProxyType({
-        "1.0": _build_aad_v1,
-        "2.0": _build_aad_v2,
+        "1.0": _build_aad_v1.__func__,
+        "2.0": _build_aad_v2.__func__,
     })
 
     # SUPPORTED_VERSIONS is derived from the registry — not maintained separately.
@@ -54,7 +55,11 @@ class SecureVault:
     MIN_KDF_OPS, MAX_KDF_OPS = 2, 10
     MIN_KDF_MEM, MAX_KDF_MEM = 32768, 262144
     MIN_KDF_P,   MAX_KDF_P   = 1, 16
+
     MAX_PAYLOAD_SIZE = 100 * 1024 * 1024    # 100 MiB hard limit
+    # Base64 inflates size by ~33%. Padding this to *2 accounts for JSON
+    # structural overhead and guarantees we catch memory exhaustion before json.loads.
+    MAX_JSON_STRING_SIZE = MAX_PAYLOAD_SIZE * 2
 
     # MappingProxyType protects the inner dictionary from runtime mutation.
     CURRENT_KDF_CONFIG = MappingProxyType({
@@ -141,6 +146,13 @@ class SecureVault:
         # Security: passphrase entropy is the caller's responsibility.
         if not passphrase:
             raise ValueError("Passphrase required for decryption.")
+
+        # ==========================================
+        # PHASE 0: Pre-Parse String Validation
+        # Prevents OOM DoS attacks via multi-gigabyte JSON structures.
+        # ==========================================
+        if len(encrypted_json) > self.MAX_JSON_STRING_SIZE:
+            raise ValueError(f"Payload string exceeds maximum allowed size ({self.MAX_JSON_STRING_SIZE} characters).")
 
         # ==========================================
         # PHASE 1: Parsing
@@ -243,8 +255,35 @@ class SecureVault:
             raise RuntimeError("Decrypted data is not valid UTF-8. Use return_bytes=True to retrieve raw bytes.") from e
 
 # ==========================================
-# Thread-Safe Smoke Tests & Validation
+# Thread-Safe Smoke Tests & Validation Helpers
 # ==========================================
+def _generate_mock_v1_blob(password: str, plaintext: bytes) -> str:
+    """Structurally constructs a genuine v1.0 blob without mutating class state."""
+    vault = SecureVault()
+    salt, nonce = os.urandom(16), os.urandom(12)
+    s_b64 = base64.b64encode(salt).decode('ascii')
+    n_b64 = base64.b64encode(nonce).decode('ascii')
+
+    # Argon2 Parameters
+    ops, mem, p, key_len = 3, 65536, 4, 32
+    key = vault._derive_key(password, salt, ops, mem, p, key_len)
+
+    # Directly invoke the unwrapped underlying v1 builder
+    # Note: .__func__ is not needed here — the descriptor protocol already returns
+    # the raw function when _build_aad_v1 is accessed from outside the class body.
+    aad = SecureVault._build_aad_v1(ops, mem, p, key_len, s_b64, n_b64)
+    ct = AESGCM(key).encrypt(nonce, plaintext, aad)
+
+    return json.dumps({
+        "header": {
+            "v": "1.0",
+            "kdf": {"ops": ops, "mem": mem, "p": p},  # Implicitly lacks key_len
+            "salt": s_b64,
+            "nonce": n_b64
+        },
+        "ciphertext": base64.b64encode(ct).decode('ascii')
+    })
+
 if __name__ == "__main__":
     vault = SecureVault()
     password = "correct-horse-battery-staple"
@@ -262,28 +301,6 @@ if __name__ == "__main__":
     print(f"Decrypted Bytes Match: {secret_bytes == decrypted_bytes}\n")
 
     print("--- 3. Legacy v1.0 Decryption Test ---")
-    # Structurally construct a genuine v1.0 blob without mutating class state
-    salt_v1, nonce_v1 = os.urandom(16), os.urandom(12)
-    s_b64 = base64.b64encode(salt_v1).decode('ascii')
-    n_b64 = base64.b64encode(nonce_v1).decode('ascii')
-
-    # Argon2 Parameters
-    v1_ops, v1_mem, v1_p, v1_key_len = 3, 65536, 4, 32
-    key_v1 = vault._derive_key(password, salt_v1, v1_ops, v1_mem, v1_p, v1_key_len)
-
-    aad_v1 = SecureVault._build_aad_v1(v1_ops, v1_mem, v1_p, v1_key_len, s_b64, n_b64)
-    ct_v1 = AESGCM(key_v1).encrypt(nonce_v1, b"Legacy data payload", aad_v1)
-
-    blob_v1_dict = {
-        "header": {
-            "v": "1.0",
-            "kdf": {"ops": v1_ops, "mem": v1_mem, "p": v1_p},  # No key_len in v1
-            "salt": s_b64,
-            "nonce": n_b64
-        },
-        "ciphertext": base64.b64encode(ct_v1).decode('ascii')
-    }
-    blob_v1 = json.dumps(blob_v1_dict)
-
+    blob_v1 = _generate_mock_v1_blob(password, b"Legacy data payload")
     print(f"Constructed v1.0 Blob: {blob_v1[:80]}...")
     print(f"Decrypted v1.0 Text: {vault.decrypt(blob_v1, password)}")
