@@ -54,6 +54,9 @@ New payloads are always written as v2.0. v1.0 payloads can be decrypted without 
 
 ## Requirements
 
+**Web UI:** A modern browser. No install.
+
+**Python CLI / library:**
 - Python 3.8+
 - Runtime: `cryptography>=44.0.0` — see [requirements.txt](requirements.txt)
 - Development: `pytest>=7.0.0`, `hypothesis>=6.0.0` — see [requirements-dev.txt](requirements-dev.txt)
@@ -63,6 +66,16 @@ New payloads are always written as v2.0. v1.0 payloads can be decrypted without 
 ```bash
 pip install -r requirements.txt
 ```
+
+## Web UI
+
+Open `index.html` directly in a browser — no server, no install required.
+
+- **Encrypt tab** — type a message, enter a passphrase, copy the encrypted blob
+- **Decrypt tab** — paste a blob, enter the passphrase, read the original message
+- Runs entirely client-side via the [WebCrypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) and [argon2-browser](https://github.com/nicktindall/argon2-browser) (loaded from CDN)
+- Blobs are **fully interchangeable** with the CLI — encrypt in the browser, decrypt with Python, and vice versa
+- Limitation: binary payloads and file encryption require the CLI
 
 ## CLI Usage
 
