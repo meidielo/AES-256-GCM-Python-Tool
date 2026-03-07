@@ -1,9 +1,12 @@
+import argparse
+import getpass
 import os
+import sys
 import json
 import base64
 import binascii
 from types import MappingProxyType
-from typing import Union
+from typing import Callable, Union
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.exceptions import InvalidTag
@@ -11,6 +14,22 @@ from cryptography.exceptions import InvalidTag
 
 class DecryptionError(Exception):
     """Raised when decryption fails due to an incorrect passphrase or tampered data."""
+
+
+# AAD builder type alias
+_AadBuilder = Callable[[int, int, int, int, str, str], bytes]
+
+
+# Module-level AAD builders — referenced directly in _AAD_BUILDERS to avoid
+# accessing staticmethod.__func__, which mypy does not support.
+def _build_aad_v1(ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
+    """Legacy v1.0 AAD excludes key_len to preserve hash identicality."""
+    return f"v=1.0;ops={ops};mem={mem};p={p};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
+
+
+def _build_aad_v2(ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
+    """v2.0 natively binds key_len to the cryptographic authentication tag."""
+    return f"v=2.0;ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
 
 class SecureVault:
@@ -29,39 +48,36 @@ class SecureVault:
     # ==========================================
     # AAD Registry & Versioning
     # ==========================================
-    @staticmethod
-    def _build_aad_v1(ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
-        """Legacy v1.0 AAD excludes key_len to preserve hash identicality."""
-        return f"v=1.0;ops={ops};mem={mem};p={p};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
-    @staticmethod
-    def _build_aad_v2(ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
-        """v2.0 natively binds key_len to the cryptographic authentication tag."""
-        return f"v=2.0;ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
-
-    # Extracting .__func__ safely registers the underlying function for < Python 3.10.
-    # Prior to Python 3.10, staticmethod objects were not directly callable.
-    _AAD_BUILDERS = MappingProxyType({
-        "1.0": _build_aad_v1.__func__,
-        "2.0": _build_aad_v2.__func__,
+    # Exposed as staticmethods so callers can invoke SecureVault._build_aad_v1(...)
+    # The registry references the module-level functions directly (before the
+    # staticmethod rebinding below), so _AAD_BUILDERS holds plain callables.
+    _AAD_BUILDERS: MappingProxyType[str, _AadBuilder] = MappingProxyType({
+        "1.0": _build_aad_v1,
+        "2.0": _build_aad_v2,
     })
+    _build_aad_v1 = staticmethod(_build_aad_v1)
+    _build_aad_v2 = staticmethod(_build_aad_v2)
 
     # SUPPORTED_VERSIONS is derived from the registry — not maintained separately.
-    SUPPORTED_VERSIONS = frozenset(_AAD_BUILDERS.keys())
-    CURRENT_VERSION = "2.0"
+    SUPPORTED_VERSIONS: frozenset[str] = frozenset(_AAD_BUILDERS.keys())
+    CURRENT_VERSION: str = "2.0"
 
     # ==========================================
     # Cryptographic Boundaries & Configurations
     # ==========================================
-    MIN_KDF_OPS, MAX_KDF_OPS = 2, 10
-    MIN_KDF_MEM, MAX_KDF_MEM = 32768, 262144
-    MIN_KDF_P,   MAX_KDF_P   = 1, 16
+    MIN_KDF_OPS: int = 2
+    MAX_KDF_OPS: int = 10
+    MIN_KDF_MEM: int = 32768
+    MAX_KDF_MEM: int = 262144
+    MIN_KDF_P:   int = 1
+    MAX_KDF_P:   int = 16
 
-    MAX_PAYLOAD_SIZE = 100 * 1024 * 1024    # 100 MiB hard limit
+    MAX_PAYLOAD_SIZE: int = 100 * 1024 * 1024   # 100 MiB hard limit
     # Base64 inflates the 100 MiB ciphertext by ~33% (to ~133 MiB).
     # The * 2 multiplier is a permissive upper bound — it admits payloads
     # larger than expected to accommodate JSON overhead without false positives.
-    MAX_JSON_STRING_SIZE = MAX_PAYLOAD_SIZE * 2
+    MAX_JSON_STRING_SIZE: int = MAX_PAYLOAD_SIZE * 2
 
     # MappingProxyType protects the inner dictionary from runtime mutation.
     #
@@ -74,7 +90,7 @@ class SecureVault:
     # enforced on decryption. Payloads encrypted with params at that floor are
     # weaker than these defaults — the floor exists for backwards compatibility,
     # not as a target.
-    CURRENT_KDF_CONFIG = MappingProxyType({
+    CURRENT_KDF_CONFIG: MappingProxyType[str, int] = MappingProxyType({
         "ops": 3,       # Iterations (time_cost)
         "mem": 65536,   # 64MB RAM (memory_cost)
         "p": 4,         # Parallelism (threads) — tune to deployment CPU core count
@@ -117,7 +133,7 @@ class SecureVault:
 
         # KDF params are stored in the payload so future code versions can still
         # decrypt packets produced with different parameters.
-        header = {
+        header: dict[str, object] = {
             "v": self.CURRENT_VERSION,
             "kdf": {
                 "ops": config["ops"],
@@ -202,11 +218,17 @@ class SecureVault:
         if len(ciphertext_with_tag) > self.MAX_PAYLOAD_SIZE + 16:  # +16 for GCM tag
             raise ValueError(f"Ciphertext exceeds maximum allowed size ({self.MAX_PAYLOAD_SIZE} bytes).")
 
-        ops, mem, p = kdf_params.get("ops"), kdf_params.get("mem"), kdf_params.get("p")
+        ops_raw = kdf_params.get("ops")
+        mem_raw = kdf_params.get("mem")
+        p_raw   = kdf_params.get("p")
 
         # Strict type check: type(x) is not int excludes booleans (isinstance(True, int) is True)
-        if type(ops) is not int or type(mem) is not int or type(p) is not int:
+        if type(ops_raw) is not int or type(mem_raw) is not int or type(p_raw) is not int:
             raise ValueError("KDF parameters (ops, mem, p) must be strict integers.")
+
+        ops = ops_raw
+        mem = mem_raw
+        p   = p_raw
 
         # Prevent Downgrade Attacks and Denial of Service (DoS)
         if not (self.MIN_KDF_OPS <= ops <= self.MAX_KDF_OPS):
@@ -216,12 +238,14 @@ class SecureVault:
         if not (self.MIN_KDF_P <= p <= self.MAX_KDF_P):
             raise ValueError("Payload KDF parallelism out of acceptable bounds.")
 
+        key_len: int
         if v == "1.0":
             key_len = 32  # Implicit fallback for legacy payloads
         else:
-            key_len = kdf_params.get("key_len")
-            if type(key_len) is not int or key_len not in {16, 24, 32}:
+            key_len_raw = kdf_params.get("key_len")
+            if type(key_len_raw) is not int or key_len_raw not in {16, 24, 32}:
                 raise ValueError("Invalid key_len: must be 16, 24, or 32.")
+            key_len = key_len_raw
 
         # ==========================================
         # PHASE 2.5: AAD Construction
@@ -260,18 +284,91 @@ class SecureVault:
             raise RuntimeError("Decrypted data is not valid UTF-8. Use return_bytes=True to retrieve raw bytes.") from e
 
 
-if __name__ == "__main__":
+# ==========================================
+# CLI
+# ==========================================
+def _cli_encrypt(args: argparse.Namespace, vault: SecureVault, passphrase: str) -> None:
+    if args.file:
+        with open(args.file, 'rb') as f:
+            plaintext: Union[str, bytes] = f.read()
+    else:
+        plaintext = args.text
+
+    blob = vault.encrypt(plaintext, passphrase)
+
+    if args.out:
+        with open(args.out, 'w') as f:
+            f.write(blob)
+        print(f"Encrypted payload written to: {args.out}")
+    else:
+        print(blob)
+
+
+def _cli_decrypt(args: argparse.Namespace, vault: SecureVault, passphrase: str) -> None:
+    if args.file:
+        with open(args.file, 'r') as f:
+            encrypted_json: str = f.read()
+    else:
+        encrypted_json = args.text
+
+    result = vault.decrypt(encrypted_json, passphrase, return_bytes=args.bytes)
+
+    if args.out:
+        mode = 'wb' if isinstance(result, bytes) else 'w'
+        with open(args.out, mode) as f:
+            f.write(result)
+        print(f"Decrypted output written to: {args.out}")
+    else:
+        if isinstance(result, bytes):
+            sys.stdout.buffer.write(result)
+        else:
+            print(result)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m secure_vault",
+        description="AES-256-GCM encryption vault with Argon2id key derivation."
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # --- encrypt ---
+    enc = sub.add_parser("encrypt", help="Encrypt plaintext to a JSON blob.")
+    src = enc.add_mutually_exclusive_group(required=True)
+    src.add_argument("--file", metavar="PATH", help="Path to plaintext file.")
+    src.add_argument("--text", metavar="TEXT", help="Plaintext string.")
+    enc.add_argument("--out", metavar="PATH", help="Write encrypted JSON to file (default: stdout).")
+
+    # --- decrypt ---
+    dec = sub.add_parser("decrypt", help="Decrypt a JSON blob to plaintext.")
+    src2 = dec.add_mutually_exclusive_group(required=True)
+    src2.add_argument("--file", metavar="PATH", help="Path to encrypted JSON file.")
+    src2.add_argument("--text", metavar="TEXT", help="Encrypted JSON string.")
+    dec.add_argument("--out", metavar="PATH", help="Write decrypted output to file (default: stdout).")
+    dec.add_argument("--bytes", action="store_true", help="Return raw bytes (for binary payloads).")
+
+    return parser
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    passphrase = getpass.getpass("Passphrase: ")
+    if not passphrase:
+        print("Error: passphrase cannot be empty.", file=sys.stderr)
+        sys.exit(1)
+
     vault = SecureVault()
-    password = "correct-horse-battery-staple"
+    try:
+        if args.command == "encrypt":
+            _cli_encrypt(args, vault, passphrase)
+        elif args.command == "decrypt":
+            _cli_decrypt(args, vault, passphrase)
+    except (ValueError, TypeError, DecryptionError, RuntimeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    print("--- 1. Standard String Encryption (v2.0) ---")
-    secret_text = "Highly confidential production data."
-    blob_v2 = vault.encrypt(secret_text, password)
-    print(f"Encrypted Blob: {blob_v2[:80]}...")
-    print(f"Decrypted Text: {vault.decrypt(blob_v2, password)}\n")
 
-    print("--- 2. Raw Bytes Encryption (v2.0) ---")
-    secret_bytes = b"\x00\xFF\x00\x11\x22\x33 Binary Payload"
-    blob_bytes = vault.encrypt(secret_bytes, password)
-    decrypted_bytes = vault.decrypt(blob_bytes, password, return_bytes=True)
-    print(f"Decrypted Bytes Match: {secret_bytes == decrypted_bytes}")
+if __name__ == "__main__":
+    main()
