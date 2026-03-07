@@ -69,7 +69,15 @@ pip install -r requirements.txt
 
 ## Web UI
 
-Open `index.html` directly in a browser — no server, no install required.
+The recommended way to open it:
+
+```bash
+python -m http.server 8000
+```
+
+Then visit `http://localhost:8000` in your browser. This avoids browser security restrictions on WASM loaded via `file://`.
+
+Alternatively, double-click `index.html` in File Explorer or run `start index.html` — this works in most browsers but may fail silently in some (Chrome in particular blocks WASM from `file://`).
 
 - **Encrypt tab** — type a message, enter a passphrase, copy the encrypted blob
 - **Decrypt tab** — paste a blob, enter the passphrase, read the original message
