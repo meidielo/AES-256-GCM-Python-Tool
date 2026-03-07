@@ -21,16 +21,14 @@ class SecureVault:
       Larger files require chunked streaming (e.g., via Tink or STREAM ciphers).
     """
 
-    # __slots__ prevents instance-level dictionary creation (e.g., self.x = 1).
     __slots__ = ()
 
     # ==========================================
-    # AAD Registry & Versioning (Single Source of Truth)
+    # AAD Registry & Versioning
     # ==========================================
     @staticmethod
     def _build_aad_v1(ops: int, mem: int, p: int, key_len: int, salt_b64: str, nonce_b64: str) -> bytes:
         """Legacy v1.0 AAD excludes key_len to preserve hash identicality."""
-        del key_len  # v1.0 does not bind key_len; present for registry signature parity
         return f"v=1.0;ops={ops};mem={mem};p={p};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
     @staticmethod
@@ -38,7 +36,7 @@ class SecureVault:
         """v2.0 natively binds key_len to the cryptographic authentication tag."""
         return f"v=2.0;ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
-    # Extracting .__func__ ensures cross-compatibility.
+    # Extracting .__func__ safely registers the underlying function for < Python 3.10.
     # Prior to Python 3.10, staticmethod objects were not directly callable.
     _AAD_BUILDERS = MappingProxyType({
         "1.0": _build_aad_v1.__func__,
@@ -105,6 +103,7 @@ class SecureVault:
 
         # 2. Derive key from passphrase using current KDF config
         # Parameters are explicitly passed; no dictionary .get() logic exists here.
+        # MemoryError may propagate naturally here if Argon2 exhausts system RAM.
         key = self._derive_key(passphrase, salt, config["ops"], config["mem"], config["p"], config["key_len"])
 
         # 3. Construct header using strict ascii-safe Base64
@@ -141,18 +140,21 @@ class SecureVault:
 
         return json.dumps(payload)
 
-    def decrypt(self, encrypted_json: str, passphrase: str, return_bytes: bool = False) -> Union[str, bytes]:
+    def decrypt(self, encrypted_json: Union[str, bytes], passphrase: str, return_bytes: bool = False) -> Union[str, bytes]:
         """Decrypts the JSON payload, validates integrity, and verifies AAD."""
         # Security: passphrase entropy is the caller's responsibility.
         if not passphrase:
             raise ValueError("Passphrase required for decryption.")
 
+        if not isinstance(encrypted_json, (str, bytes)):
+            raise TypeError("Encrypted payload must be a string or bytes.")
+
         # ==========================================
-        # PHASE 0: Pre-Parse String Validation
+        # PHASE 0: Pre-Parse Validation
         # Prevents OOM DoS attacks via multi-gigabyte JSON structures.
         # ==========================================
         if len(encrypted_json) > self.MAX_JSON_STRING_SIZE:
-            raise ValueError(f"Payload string exceeds maximum allowed size ({self.MAX_JSON_STRING_SIZE} characters).")
+            raise ValueError(f"Payload input exceeds maximum allowed size ({self.MAX_JSON_STRING_SIZE} units).")
 
         # ==========================================
         # PHASE 1: Parsing
@@ -240,6 +242,8 @@ class SecureVault:
             decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, aad)
         except InvalidTag as e:
             raise PermissionError("Decryption failed: Integrity check failed or incorrect password.") from e
+        except MemoryError as e:
+            raise RuntimeError("Insufficient system memory to perform Argon2 key derivation.") from e
         except Exception as e:
             raise RuntimeError("Unexpected cryptographic error during decryption.") from e
 
@@ -258,19 +262,20 @@ class SecureVault:
 # Thread-Safe Smoke Tests & Validation Helpers
 # ==========================================
 def _generate_mock_v1_blob(password: str, plaintext: bytes) -> str:
-    """Structurally constructs a genuine v1.0 blob without mutating class state."""
+    """
+    Structurally constructs a genuine v1.0 blob without mutating class state.
+    Note: This accesses internal APIs (_derive_key, _build_aad_v1) for testing
+    purposes only. It is not part of the public API.
+    """
     vault = SecureVault()
     salt, nonce = os.urandom(16), os.urandom(12)
     s_b64 = base64.b64encode(salt).decode('ascii')
     n_b64 = base64.b64encode(nonce).decode('ascii')
 
-    # Argon2 Parameters
     ops, mem, p, key_len = 3, 65536, 4, 32
     key = vault._derive_key(password, salt, ops, mem, p, key_len)
 
-    # Directly invoke the unwrapped underlying v1 builder
-    # Note: .__func__ is not needed here — the descriptor protocol already returns
-    # the raw function when _build_aad_v1 is accessed from outside the class body.
+    # Access via the class object directly — descriptor protocol unwraps staticmethod
     aad = SecureVault._build_aad_v1(ops, mem, p, key_len, s_b64, n_b64)
     ct = AESGCM(key).encrypt(nonce, plaintext, aad)
 
