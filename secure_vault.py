@@ -14,9 +14,8 @@ class SecureVault:
 
     Security Notes:
     - Passphrase entropy is the caller's responsibility.
-    - Large Plaintexts: This implementation loads the entire plaintext and
-      ciphertext into RAM. It is not suitable for multi-gigabyte files,
-      which could cause an Out-Of-Memory (OOM) Denial of Service.
+    - OOM Protection: Payloads are capped at 100 MiB. Larger files require
+      chunked streaming (e.g., via Tink or STREAM ciphers).
     """
 
     # __slots__ prevents instance-level dictionary creation (e.g., self.x = 1).
@@ -36,8 +35,10 @@ class SecureVault:
         """v2.0 natively binds key_len to the cryptographic authentication tag."""
         return f"v=2.0;ops={ops};mem={mem};p={p};key_len={key_len};salt={salt_b64};nonce={nonce_b64}".encode('ascii')
 
-    # The registry strictly couples supported versions to their implementations.
-    # Adding a new version here without a builder branch will surface immediately.
+    # Note: Because these functions are referenced here at class definition time,
+    # they are stored as unbound functions. When retrieved from this dict, they
+    # bypass the descriptor protocol and behave exactly like plain functions.
+    # DO NOT wrap them in staticmethod() here, or calling them will raise TypeError.
     _AAD_BUILDERS = MappingProxyType({
         "1.0": _build_aad_v1,
         "2.0": _build_aad_v2,
@@ -53,6 +54,7 @@ class SecureVault:
     MIN_KDF_OPS, MAX_KDF_OPS = 2, 10
     MIN_KDF_MEM, MAX_KDF_MEM = 32768, 262144
     MIN_KDF_P,   MAX_KDF_P   = 1, 16
+    MAX_PAYLOAD_SIZE = 100 * 1024 * 1024    # 100 MiB hard limit
 
     # MappingProxyType protects the inner dictionary from runtime mutation.
     CURRENT_KDF_CONFIG = MappingProxyType({
@@ -83,6 +85,9 @@ class SecureVault:
 
         # Handle binary vs string data explicitly
         plaintext_bytes = plaintext.encode('utf-8') if isinstance(plaintext, str) else plaintext
+
+        if len(plaintext_bytes) > self.MAX_PAYLOAD_SIZE:
+            raise ValueError(f"Plaintext exceeds maximum allowed size ({self.MAX_PAYLOAD_SIZE} bytes).")
 
         # 1. Generate unique 16-byte salt and 12-byte nonce (NIST Standard)
         salt = os.urandom(16)
@@ -159,6 +164,8 @@ class SecureVault:
         # PHASE 2: Validation
         # ==========================================
         v = header.get("v")
+        if not v:
+            raise ValueError("Missing version field in payload header.")
         if v not in self.SUPPORTED_VERSIONS:
             raise ValueError(f"Unsupported payload version: {v}")
 
@@ -170,8 +177,11 @@ class SecureVault:
             raise ValueError(f"Invalid salt length: expected 16, got {len(salt)}.")
         if len(nonce) != 12:
             raise ValueError(f"Invalid nonce length: expected 12, got {len(nonce)}.")
+
         if len(ciphertext_with_tag) < 16:
             raise ValueError("Ciphertext too short to contain GCM authentication tag.")
+        if len(ciphertext_with_tag) > self.MAX_PAYLOAD_SIZE + 16:  # +16 for GCM tag
+            raise ValueError(f"Ciphertext exceeds maximum allowed size ({self.MAX_PAYLOAD_SIZE} bytes).")
 
         # KDF boundary validations
         ops, mem, p = kdf_params.get("ops"), kdf_params.get("mem"), kdf_params.get("p")
@@ -233,7 +243,7 @@ class SecureVault:
             raise RuntimeError("Decrypted data is not valid UTF-8. Use return_bytes=True to retrieve raw bytes.") from e
 
 # ==========================================
-# Smoke Tests & Usage Examples
+# Thread-Safe Smoke Tests & Validation
 # ==========================================
 if __name__ == "__main__":
     vault = SecureVault()
@@ -248,15 +258,32 @@ if __name__ == "__main__":
     print("--- 2. Raw Bytes Encryption (v2.0) ---")
     secret_bytes = b"\x00\xFF\x00\x11\x22\x33 Binary Payload"
     blob_bytes = vault.encrypt(secret_bytes, password)
-    decrypted_bytes_result = vault.decrypt(blob_bytes, password, return_bytes=True)
-    print(f"Decrypted Bytes Match: {secret_bytes == decrypted_bytes_result}\n")
+    decrypted_bytes = vault.decrypt(blob_bytes, password, return_bytes=True)
+    print(f"Decrypted Bytes Match: {secret_bytes == decrypted_bytes}\n")
 
     print("--- 3. Legacy v1.0 Decryption Test ---")
-    # A mocked v1.0 payload representing data encrypted before key_len was added.
-    # We generate this by temporarily forcing the class into v1.0 mode.
-    SecureVault.CURRENT_VERSION = "1.0"
-    blob_v1 = vault.encrypt("Legacy data payload", password)
-    SecureVault.CURRENT_VERSION = "2.0"  # Restore
+    # Structurally construct a genuine v1.0 blob without mutating class state
+    salt_v1, nonce_v1 = os.urandom(16), os.urandom(12)
+    s_b64 = base64.b64encode(salt_v1).decode('ascii')
+    n_b64 = base64.b64encode(nonce_v1).decode('ascii')
 
-    print(f"Legacy Blob v1.0: {blob_v1[:80]}...")
+    # Argon2 Parameters
+    v1_ops, v1_mem, v1_p, v1_key_len = 3, 65536, 4, 32
+    key_v1 = vault._derive_key(password, salt_v1, v1_ops, v1_mem, v1_p, v1_key_len)
+
+    aad_v1 = SecureVault._build_aad_v1(v1_ops, v1_mem, v1_p, v1_key_len, s_b64, n_b64)
+    ct_v1 = AESGCM(key_v1).encrypt(nonce_v1, b"Legacy data payload", aad_v1)
+
+    blob_v1_dict = {
+        "header": {
+            "v": "1.0",
+            "kdf": {"ops": v1_ops, "mem": v1_mem, "p": v1_p},  # No key_len in v1
+            "salt": s_b64,
+            "nonce": n_b64
+        },
+        "ciphertext": base64.b64encode(ct_v1).decode('ascii')
+    }
+    blob_v1 = json.dumps(blob_v1_dict)
+
+    print(f"Constructed v1.0 Blob: {blob_v1[:80]}...")
     print(f"Decrypted v1.0 Text: {vault.decrypt(blob_v1, password)}")
