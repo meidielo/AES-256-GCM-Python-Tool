@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import binascii
+from types import MappingProxyType
 from typing import Dict, Any, Union
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
@@ -9,54 +10,71 @@ from cryptography.exceptions import InvalidTag
 
 class SecureVault:
     """
-    A production-grade AES-256-GCM vault using Argon2id for key derivation.
+    A production-grade AES-GCM vault using Argon2id for key derivation.
     """
 
-    SUPPORTED_VERSIONS = {"1.0"}
-    CURRENT_VERSION = "1.0"
+    # __slots__ prevents instance dictionary creation, freezing instance state.
+    __slots__ = ()
 
-    # KDF Parameter Boundary Clamping
-    # Prevents Downgrade Attacks (weak keys) and DoS Attacks (memory exhaustion)
-    MIN_KDF_OPS = 2
-    MAX_KDF_OPS = 10
-    MIN_KDF_MEM = 32768     # 32 MiB
-    MAX_KDF_MEM = 262144    # 256 MiB
+    SUPPORTED_VERSIONS = {"1.0", "2.0"}
+    CURRENT_VERSION = "2.0"
 
-    # Current recommended KDF defaults (OWASP 2023/2024)
-    # Stored as a class-level constant to prevent accidental instance mutation.
-    CURRENT_KDF_CONFIG = {
+    # Boundary Clamping for DoS and Downgrade Protection
+    MIN_KDF_OPS, MAX_KDF_OPS = 2, 10
+    MIN_KDF_MEM, MAX_KDF_MEM = 32768, 262144
+    MIN_KDF_P,   MAX_KDF_P   = 1, 16
+
+    # MappingProxyType ensures the dictionary cannot be mutated at runtime
+    # (e.g., SecureVault.CURRENT_KDF_CONFIG["ops"] = 1 will raise TypeError)
+    CURRENT_KDF_CONFIG = MappingProxyType({
         "ops": 3,       # Iterations (time_cost)
         "mem": 65536,   # 64MB RAM (memory_cost)
         "p": 4,         # Parallelism (threads)
         "key_len": 32   # 256-bit key for AES-256
-    }
+    })
 
-    def _derive_key(self, passphrase: str, salt: bytes, config: Dict[str, int]) -> bytes:
-        """Derives a key using Argon2id with provided parameters."""
+    def _derive_key(self, passphrase: str, salt: bytes, ops: int, mem: int, p: int, key_len: int) -> bytes:
+        """Derives a key. No dictionary .get() fallbacks — strict args only."""
         kdf = Argon2id(
             salt=salt,
-            length=config.get("key_len", 32),   # Default fallback for safety
-            iterations=config["ops"],
-            lanes=config["p"],                   # parallelism
-            memory_cost=config["mem"],
+            length=key_len,
+            iterations=ops,
+            lanes=p,            # parallelism
+            memory_cost=mem,
         )
         return kdf.derive(passphrase.encode('utf-8'))
 
     def _build_aad(self, header: Dict[str, Any]) -> bytes:
         """
-        Constructs a deterministic, version-locked canonical format for AAD.
-        Avoids json.dumps() completely to prevent byte-drift across Python
-        versions, OS platforms, or stdlib modifications.
+        Constructs deterministic AAD, strictly isolating version structures.
+        Avoids json.dumps() to prevent byte-drift across Python versions or platforms.
         """
-        return (
-            f"v={header['v']};"
-            f"ops={header['kdf']['ops']};"
-            f"mem={header['kdf']['mem']};"
-            f"p={header['kdf']['p']};"
-            f"key_len={header['kdf']['key_len']};"
-            f"salt={header['salt']};"
-            f"nonce={header['nonce']}"
-        ).encode('ascii')
+        v = header['v']
+
+        # Legacy v1.0 Compatibility: Excludes key_len to preserve hash identicality
+        if v == "1.0":
+            return (
+                f"v={v};"
+                f"ops={header['kdf']['ops']};"
+                f"mem={header['kdf']['mem']};"
+                f"p={header['kdf']['p']};"
+                f"salt={header['salt']};"
+                f"nonce={header['nonce']}"
+            ).encode('ascii')
+
+        # v2.0 Structure: Includes key_len in cryptographic binding
+        if v == "2.0":
+            return (
+                f"v={v};"
+                f"ops={header['kdf']['ops']};"
+                f"mem={header['kdf']['mem']};"
+                f"p={header['kdf']['p']};"
+                f"key_len={header['kdf']['key_len']};"
+                f"salt={header['salt']};"
+                f"nonce={header['nonce']}"
+            ).encode('ascii')
+
+        raise ValueError(f"Cannot build AAD for unsupported version: {v}")
 
     def encrypt(self, plaintext: Union[str, bytes], passphrase: str) -> str:
         """Encrypts data and returns a structured JSON object with embedded KDF parameters."""
@@ -67,10 +85,7 @@ class SecureVault:
             raise ValueError("Plaintext data cannot be empty.")
 
         # Handle binary vs string data explicitly
-        if isinstance(plaintext, str):
-            plaintext_bytes = plaintext.encode('utf-8')
-        else:
-            plaintext_bytes = plaintext
+        plaintext_bytes = plaintext.encode('utf-8') if isinstance(plaintext, str) else plaintext
 
         # 1. Generate unique 16-byte salt and 12-byte nonce (NIST Standard)
         salt = os.urandom(16)
@@ -78,7 +93,8 @@ class SecureVault:
         config = self.CURRENT_KDF_CONFIG
 
         # 2. Derive key from passphrase using current KDF config
-        key = self._derive_key(passphrase, salt, config)
+        # Parameters are explicitly passed; no dictionary .get() logic exists here.
+        key = self._derive_key(passphrase, salt, config["ops"], config["mem"], config["p"], config["key_len"])
 
         # 3. Construct header using strict ascii-safe Base64
         # We store KDF params in the payload so future versions of this code
@@ -120,7 +136,7 @@ class SecureVault:
             raise ValueError("Passphrase required for decryption.")
 
         # ==========================================
-        # PHASE 1: Parsing (Strictly scoped catch)
+        # PHASE 1: Parsing
         # ==========================================
         try:
             full_packet = json.loads(encrypted_json)
@@ -133,35 +149,48 @@ class SecureVault:
             raise ValueError(f"Decryption failed: Malformed payload structure. {e}") from e
 
         # ==========================================
-        # PHASE 2: Validation (Unwrapped logic)
+        # PHASE 2: Validation
         # ==========================================
-        # Any ValueError raised here propagates directly to the caller,
-        # cleanly avoiding the "except ValueError: raise" trap.
+        v = header.get("v")
+        if v not in self.SUPPORTED_VERSIONS:
+            raise ValueError(f"Unsupported payload version: {v}")
 
-        if header.get("v") not in self.SUPPORTED_VERSIONS:
-            raise ValueError(f"Unsupported payload version: {header.get('v')}")
-
+        # Cryptographic field length checks
         if len(salt) != 16:
-            raise ValueError(f"Invalid salt length: expected 16 bytes, got {len(salt)}.")
+            raise ValueError(f"Invalid salt length: expected 16, got {len(salt)}.")
         if len(nonce) != 12:
-            raise ValueError(f"Invalid nonce length: expected 12 bytes, got {len(nonce)}.")
+            raise ValueError(f"Invalid nonce length: expected 12, got {len(nonce)}.")
+        if len(ciphertext_with_tag) < 16:
+            raise ValueError("Ciphertext too short to contain GCM authentication tag.")
 
-        ops, mem = kdf_params.get("ops"), kdf_params.get("mem")
-        if not isinstance(ops, int) or not isinstance(mem, int):
-            raise ValueError("KDF parameters must be integers.")
+        # KDF boundary validations
+        ops, mem, p = kdf_params.get("ops"), kdf_params.get("mem"), kdf_params.get("p")
+        if not (isinstance(ops, int) and isinstance(mem, int) and isinstance(p, int)):
+            raise ValueError("KDF parameters (ops, mem, p) must be integers.")
 
         # Prevent Downgrade Attacks and Denial of Service (DoS)
-        if ops < self.MIN_KDF_OPS or mem < self.MIN_KDF_MEM:
-            raise ValueError("Payload KDF parameters below minimum security threshold.")
-        if ops > self.MAX_KDF_OPS or mem > self.MAX_KDF_MEM:
-            raise ValueError("Payload KDF parameters exceed maximum allowed thresholds.")
+        if not (self.MIN_KDF_OPS <= ops <= self.MAX_KDF_OPS):
+            raise ValueError("Payload KDF operations out of acceptable bounds.")
+        if not (self.MIN_KDF_MEM <= mem <= self.MAX_KDF_MEM):
+            raise ValueError("Payload KDF memory out of acceptable bounds.")
+        if not (self.MIN_KDF_P <= p <= self.MAX_KDF_P):
+            raise ValueError("Payload KDF parallelism out of acceptable bounds.")
+
+        # Version-specific key length logic
+        if v == "1.0":
+            key_len = 32  # Implicit fallback for legacy payloads
+        else:
+            key_len = kdf_params.get("key_len")
+            if key_len not in {16, 24, 32}:
+                raise ValueError("Invalid key_len: must be 16, 24, or 32.")
 
         # ==========================================
         # PHASE 3: Cryptography
         # ==========================================
         try:
             aad = self._build_aad(header)
-            key = self._derive_key(passphrase, salt, kdf_params)
+            # Parameters are explicitly passed; no dictionary .get() logic exists here.
+            key = self._derive_key(passphrase, salt, ops, mem, p, key_len)
 
             # Decrypt and verify tag
             # InvalidTag triggers if: password wrong, ciphertext modified,
@@ -174,7 +203,7 @@ class SecureVault:
             raise RuntimeError("Unexpected cryptographic error during decryption.") from e
 
         # ==========================================
-        # PHASE 4: Output Formatting
+        # PHASE 4: Output
         # ==========================================
         if return_bytes:
             return decrypted_bytes
@@ -190,7 +219,7 @@ if __name__ == "__main__":
     secret_data = "Sensitive User Information: API_KEY_12345"
     password = "correct-horse-battery-staple"
 
-    # 1. Standard encrypt/decrypt flow
+    # 1. Standard encrypt/decrypt flow (v2.0)
     encrypted_packet = vault.encrypt(secret_data, password)
     print(f"Encrypted Payload (JSON):\n{encrypted_packet[:100]}...\n")
 
@@ -203,7 +232,7 @@ if __name__ == "__main__":
     # 2. Demonstrate AAD Protection (Tampering with Metadata)
     import json as _json
     tampered_blob = _json.loads(encrypted_packet)
-    tampered_blob["header"]["v"] = "2.0"  # Modify unencrypted metadata
+    tampered_blob["header"]["v"] = "9.9"  # Modify unencrypted metadata
     tampered_json = _json.dumps(tampered_blob)
 
     try:
