@@ -1,6 +1,7 @@
 import pytest
 import json
 import base64
+from hypothesis import given, strategies as st, settings
 from secure_vault import SecureVault, _generate_mock_v1_blob
 
 # ==========================================
@@ -22,52 +23,87 @@ def standard_blob(vault, password):
 # 1. Core Functionality (Happy Paths)
 # ==========================================
 def test_roundtrip_string(vault, password):
-    """Proves standard UTF-8 string encryption and decryption works."""
     plaintext = "Hello, world! 🌍"
     blob = vault.encrypt(plaintext, password)
     assert vault.decrypt(blob, password) == plaintext
 
 def test_roundtrip_bytes(vault, password):
-    """Proves raw binary encryption and decryption works."""
     plaintext = b"\x00\xFF\xDE\xAD\xBE\xEF\x00"
     blob = vault.encrypt(plaintext, password)
     assert vault.decrypt(blob, password, return_bytes=True) == plaintext
 
+def test_decrypt_accepts_bytes_input(vault, password):
+    blob_bytes = vault.encrypt("hello", password).encode('utf-8')
+    assert vault.decrypt(blob_bytes, password) == "hello"
+
 def test_legacy_v1_decryption(vault, password):
-    """Proves the system can correctly parse and decrypt legacy payloads."""
     legacy_data = b"Legacy data payload"
     blob_v1 = _generate_mock_v1_blob(password, legacy_data)
     assert vault.decrypt(blob_v1, password) == legacy_data.decode('utf-8')
 
 # ==========================================
-# 2. Authentication & Integrity (Negative Tests)
+# 2. Cryptographic Contract & Schema Validation
+# ==========================================
+def test_encryption_is_non_deterministic(vault, password):
+    blob1 = vault.encrypt("same data", password)
+    blob2 = vault.encrypt("same data", password)
+
+    payload1 = json.loads(blob1)
+    payload2 = json.loads(blob2)
+
+    assert payload1["ciphertext"] != payload2["ciphertext"]
+    assert payload1["header"]["nonce"] != payload2["header"]["nonce"]
+    assert payload1["header"]["salt"] != payload2["header"]["salt"]
+
+def test_payload_structure(vault, password):
+    blob = vault.encrypt("data", password)
+    payload = json.loads(blob)
+
+    assert "header" in payload
+    assert "ciphertext" in payload
+    assert payload["header"]["v"] == "2.0"
+    assert "salt" in payload["header"]
+    assert "nonce" in payload["header"]
+    assert all(k in payload["header"]["kdf"] for k in ("ops", "mem", "p", "key_len"))
+
+# ==========================================
+# 3. Authentication & Integrity (Negative Tests)
 # ==========================================
 def test_wrong_password_raises_permission_error(vault, standard_blob):
-    """Proves incorrect passwords fail cleanly without crashing the parser."""
     with pytest.raises(PermissionError, match="Integrity check failed"):
         vault.decrypt(standard_blob, "wrong-password")
 
 def test_tampered_metadata_fails_aad(vault, standard_blob, password):
-    """Proves that modifying an unencrypted JSON field breaks the AAD cryptographic bind."""
     payload = json.loads(standard_blob)
-    payload["header"]["kdf"]["ops"] += 1  # Attacker alters derivation cost without touching ciphertext
+    payload["header"]["kdf"]["ops"] += 1
     tampered_blob = json.dumps(payload)
 
     with pytest.raises(PermissionError, match="Integrity check failed"):
         vault.decrypt(tampered_blob, password)
 
 def test_tampered_ciphertext_fails_tag(vault, standard_blob, password):
-    """Proves that flipping a bit in the ciphertext triggers an InvalidTag."""
     payload = json.loads(standard_blob)
     raw_ct = bytearray(base64.b64decode(payload["ciphertext"]))
-    raw_ct[0] ^= 0xFF  # Flip bits in the first byte
+    raw_ct[0] ^= 0xFF
     payload["ciphertext"] = base64.b64encode(raw_ct).decode('ascii')
 
     with pytest.raises(PermissionError, match="Integrity check failed"):
         vault.decrypt(json.dumps(payload), password)
 
+def test_v1_blob_rejected_by_v2_aad(vault, password):
+    """Proves version AAD structures are cryptographically isolated from each other."""
+    blob_v1 = _generate_mock_v1_blob(password, b"data")
+    payload = json.loads(blob_v1)
+
+    # Mutate to bypass Phase 2 structural validation and force Phase 3 AAD rejection
+    payload["header"]["v"] = "2.0"
+    payload["header"]["kdf"]["key_len"] = 32
+
+    with pytest.raises(PermissionError, match="Integrity check failed"):
+        vault.decrypt(json.dumps(payload), password)
+
 # ==========================================
-# 3. Boundary & Type Evasion Enforcement
+# 4. Boundary & Type Evasion Enforcement
 # ==========================================
 @pytest.mark.parametrize("field,value,match", [
     ("ops", 1,      "operations out of acceptable bounds"),
@@ -76,24 +112,33 @@ def test_tampered_ciphertext_fails_tag(vault, standard_blob, password):
     ("mem", 524288, "memory out of acceptable bounds"),
     ("p",   0,      "parallelism out of acceptable bounds"),
     ("p",   17,     "parallelism out of acceptable bounds"),
-    ("key_len", 15, "Invalid key_len: must be 16, 24, or 32"),
+    ("key_len", 15, r"Invalid key_len: must be 16, 24, or 32\."),
 ])
 def test_kdf_boundary_enforcement(vault, standard_blob, password, field, value, match):
-    """Proves KDF boundaries strictly prevent Downgrade and DoS attacks."""
     payload = json.loads(standard_blob)
     payload["header"]["kdf"][field] = value
     with pytest.raises(ValueError, match=match):
         vault.decrypt(json.dumps(payload), password)
 
 def test_boolean_type_evasion(vault, standard_blob, password):
-    """Proves that `type(x) is int` catches boolean evasions (isinstance(True, int) == True)."""
     payload = json.loads(standard_blob)
     payload["header"]["kdf"]["ops"] = True
     with pytest.raises(ValueError, match="must be strict integers"):
         vault.decrypt(json.dumps(payload), password)
 
+def test_decrypt_rejects_invalid_type(vault, password):
+    with pytest.raises(TypeError, match="must be a string or bytes"):
+        vault.decrypt(12345, password)
+
+def test_tag_only_ciphertext_fails(vault, password):
+    """Proves a 16-byte (tag-only, empty ciphertext) payload is rejected by AES-GCM."""
+    payload = json.loads(vault.encrypt("x", password))
+    payload["ciphertext"] = base64.b64encode(b"\x00" * 16).decode('ascii')
+    with pytest.raises(PermissionError, match="Integrity check failed"):
+        vault.decrypt(json.dumps(payload), password)
+
 # ==========================================
-# 4. Malformed Payloads & Invalid Inputs
+# 5. Malformed Payloads & Invalid Inputs
 # ==========================================
 @pytest.mark.parametrize("payload,expected_err", [
     ("not json at all", ValueError),
@@ -104,7 +149,6 @@ def test_boolean_type_evasion(vault, standard_blob, password):
     (json.dumps({"header": {"v": "2.0", "kdf": {"ops": 3, "mem": 65536, "p": 4, "key_len": 32}, "salt": 12345, "nonce": "b"}, "ciphertext": "abc"}), ValueError),
 ])
 def test_malformed_payloads_raise_value_error(vault, password, payload, expected_err):
-    """Proves structural JSON defects are caught before cryptographic execution."""
     with pytest.raises(expected_err):
         vault.decrypt(payload, password)
 
@@ -114,21 +158,43 @@ def test_malformed_payloads_raise_value_error(vault, password, payload, expected
     ("valid data", "", ValueError),
 ])
 def test_invalid_inputs_rejected(vault, plaintext, passphrase, exc):
-    """Proves empty strings/bytes/passwords are caught at the entry point."""
     with pytest.raises(exc):
         vault.encrypt(plaintext, passphrase)
 
+def test_binary_data_returns_runtime_error_without_flag(vault, password):
+    blob = vault.encrypt(b"\x00\xFF\xDE\xAD", password)
+    with pytest.raises(RuntimeError, match="not valid UTF-8"):
+        vault.decrypt(blob, password)
+
 # ==========================================
-# 5. OOM & Resource Limits
+# 6. OOM & Resource Limits
 # ==========================================
 def test_oversized_payload_rejection_encrypt(vault, password):
-    """Proves that allocating > MAX_PAYLOAD_SIZE fails gracefully before encryption."""
     oversized_data = b"\x00" * (SecureVault.MAX_PAYLOAD_SIZE + 1)
     with pytest.raises(ValueError, match="exceeds maximum allowed size"):
         vault.encrypt(oversized_data, password)
 
 def test_oversized_json_rejected_before_parse_decrypt(vault, password):
-    """Proves that giant JSON strings are rejected BEFORE json.loads builds the AST in memory."""
     giant_string = "x" * (SecureVault.MAX_JSON_STRING_SIZE + 1)
     with pytest.raises(ValueError, match="exceeds maximum allowed size"):
         vault.decrypt(giant_string, password)
+
+# ==========================================
+# 7. Property-Based Fuzz Testing (Hypothesis)
+# ==========================================
+# We instantiate SecureVault locally to avoid pytest fixture scoping conflicts with hypothesis.
+@given(st.binary(min_size=1, max_size=10000))
+@settings(max_examples=100)
+def test_roundtrip_arbitrary_bytes(data):
+    """Fuzzes binary encryption with arbitrary byte arrays including null bytes."""
+    vault = SecureVault()
+    blob = vault.encrypt(data, "passphrase")
+    assert vault.decrypt(blob, "passphrase", return_bytes=True) == data
+
+@given(st.text(min_size=1, max_size=10000))
+@settings(max_examples=100)
+def test_roundtrip_arbitrary_strings(text_data):
+    """Fuzzes string encryption with arbitrary unicode, surrogates, and control characters."""
+    vault = SecureVault()
+    blob = vault.encrypt(text_data, "passphrase")
+    assert vault.decrypt(blob, "passphrase") == text_data

@@ -20,6 +20,10 @@ env/
 *.key
 *.pem
 
+# Testing
+.pytest_cache/
+.hypothesis/
+
 # IDE
 .vscode/
 .idea/
