@@ -7,8 +7,9 @@ A production-grade symmetric encryption tool using **AES-256-GCM** with **Argon2
 | Property | Detail |
 |---|---|
 | Cipher | AES-256-GCM (authenticated encryption) |
-| Key derivation | Argon2id — OWASP 2023/2024 recommended params |
-| KDF params | ops=3, memory=64MB, lanes=4, key_len=32 |
+| Key derivation | Argon2id |
+| KDF defaults | ops=3, memory=64MB, p=4, key_len=32 — exceeds OWASP 2023/2024 minimum baseline (19 MiB / 2 iterations) |
+| KDF floor (enforced on decrypt) | ops≥2, memory≥32MB, p∈[1,16] — weaker than defaults; exists for backwards compatibility |
 | Salt | 16 bytes, random per encryption |
 | Nonce | 12 bytes, random per encryption (NIST standard) |
 | Auth tag | 16 bytes, appended to ciphertext by GCM |

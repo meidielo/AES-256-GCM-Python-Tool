@@ -64,10 +64,20 @@ class SecureVault:
     MAX_JSON_STRING_SIZE = MAX_PAYLOAD_SIZE * 2
 
     # MappingProxyType protects the inner dictionary from runtime mutation.
+    #
+    # These defaults exceed OWASP's 2023/2024 minimum baseline for Argon2id
+    # (19 MiB / 2 iterations), but were not derived from that guidance directly.
+    # p=4 is not an OWASP recommendation — parallelism should be tuned to the
+    # CPU core count of the deployment target.
+    #
+    # Note: MIN_KDF_MEM (32 MiB) and MIN_KDF_OPS (2) define the security floor
+    # enforced on decryption. Payloads encrypted with params at that floor are
+    # weaker than these defaults — the floor exists for backwards compatibility,
+    # not as a target.
     CURRENT_KDF_CONFIG = MappingProxyType({
         "ops": 3,       # Iterations (time_cost)
         "mem": 65536,   # 64MB RAM (memory_cost)
-        "p": 4,         # Parallelism (threads)
+        "p": 4,         # Parallelism (threads) — tune to deployment CPU core count
         "key_len": 32   # 256-bit key for AES-256
     })
 
