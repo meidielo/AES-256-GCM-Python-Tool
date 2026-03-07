@@ -8,6 +8,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.exceptions import InvalidTag
 
+
+class DecryptionError(Exception):
+    """Raised when decryption fails due to an incorrect passphrase or tampered data."""
+
+
 class SecureVault:
     """
     A production-grade AES-GCM vault using Argon2id for key derivation.
@@ -20,8 +25,6 @@ class SecureVault:
       allocation, and ciphertext byte arrays existing simultaneously.
       Larger files require chunked streaming (e.g., via Tink or STREAM ciphers).
     """
-
-    __slots__ = ()
 
     # ==========================================
     # AAD Registry & Versioning
@@ -56,8 +59,8 @@ class SecureVault:
 
     MAX_PAYLOAD_SIZE = 100 * 1024 * 1024    # 100 MiB hard limit
     # Base64 inflates the 100 MiB ciphertext by ~33% (to ~133 MiB).
-    # The * 2 multiplier (200 MiB) provides a generous ~67 MiB safety margin
-    # for JSON structural overhead and metadata before rejecting the string.
+    # The * 2 multiplier is a permissive upper bound — it admits payloads
+    # larger than expected to accommodate JSON overhead without false positives.
     MAX_JSON_STRING_SIZE = MAX_PAYLOAD_SIZE * 2
 
     # MappingProxyType protects the inner dictionary from runtime mutation.
@@ -81,20 +84,17 @@ class SecureVault:
 
     def encrypt(self, plaintext: Union[str, bytes], passphrase: str) -> str:
         """Encrypts data and returns a structured JSON object with embedded KDF parameters."""
-        # Security: passphrase entropy is the caller's responsibility.
         if not passphrase:
             raise ValueError("Passphrase cannot be empty.")
         if not plaintext:  # Note: empty bytes b"" intentionally triggers this. b"\x00" will pass.
             raise ValueError("Plaintext data cannot be empty.")
 
-        # Handle binary vs string data explicitly
         plaintext_bytes = plaintext.encode('utf-8') if isinstance(plaintext, str) else plaintext
 
         if len(plaintext_bytes) > self.MAX_PAYLOAD_SIZE:
             raise ValueError(f"Plaintext exceeds maximum allowed size ({self.MAX_PAYLOAD_SIZE} bytes).")
 
-        # 1. Generate unique 16-byte salt and 12-byte nonce (NIST Standard)
-        salt = os.urandom(16)
+        salt  = os.urandom(16)
         nonce = os.urandom(12)
         config = self.CURRENT_KDF_CONFIG
 
@@ -102,14 +102,11 @@ class SecureVault:
         salt_b64  = base64.b64encode(salt).decode('ascii')
         nonce_b64 = base64.b64encode(nonce).decode('ascii')
 
-        # 2. Derive key from passphrase using current KDF config
-        # Parameters are explicitly passed; no dictionary .get() logic exists here.
         # MemoryError may propagate naturally here if Argon2 exhausts system RAM.
         key = self._derive_key(passphrase, salt, config["ops"], config["mem"], config["p"], config["key_len"])
 
-        # 3. Construct header using strict ascii-safe Base64
-        # We store KDF params in the payload so future versions of this code
-        # can still decrypt this specific packet.
+        # KDF params are stored in the payload so future code versions can still
+        # decrypt packets produced with different parameters.
         header = {
             "v": self.CURRENT_VERSION,
             "kdf": {
@@ -122,28 +119,22 @@ class SecureVault:
             "nonce": nonce_b64
         }
 
-        # 4. Look up the correct AAD builder from the registry and build AAD
-        # Binding the version, salt, and KDF params to the ciphertext integrity
-        # means any tampering with unencrypted metadata will fail the auth tag check.
+        # Binding the version, salt, and KDF params to the ciphertext via AAD means
+        # any tampering with unencrypted metadata will fail the auth tag check.
         builder = self._AAD_BUILDERS[self.CURRENT_VERSION]
         aad = builder(config["ops"], config["mem"], config["p"], config["key_len"], salt_b64, nonce_b64)
 
-        # 5. Encrypt using AES-GCM — encrypt() returns: ciphertext + 16-byte auth tag
         aesgcm = AESGCM(key)
         ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext_bytes, aad)
 
-        # 6. Construct transport object
-        # Outer JSON dump is safe here, as it's only transport, not AAD
-        payload = {
+        # Outer JSON dump is safe here — it's transport only, not part of AAD
+        return json.dumps({
             "header": header,
             "ciphertext": base64.b64encode(ciphertext_with_tag).decode('ascii')
-        }
-
-        return json.dumps(payload)
+        })
 
     def decrypt(self, encrypted_json: Union[str, bytes], passphrase: str, return_bytes: bool = False) -> Union[str, bytes]:
         """Decrypts the JSON payload, validates integrity, and verifies AAD."""
-        # Security: passphrase entropy is the caller's responsibility.
         if not passphrase:
             raise ValueError("Passphrase required for decryption.")
 
@@ -177,7 +168,7 @@ class SecureVault:
             salt  = base64.b64decode(salt_b64)
             nonce = base64.b64decode(nonce_b64)
         except (KeyError, json.JSONDecodeError, binascii.Error, TypeError) as e:
-            raise ValueError(f"Decryption failed: Malformed payload structure. {e}") from e
+            raise ValueError(f"Malformed payload structure: {e}") from e
 
         # ==========================================
         # PHASE 2: Validation
@@ -191,7 +182,6 @@ class SecureVault:
         if not isinstance(kdf_params, dict):
             raise ValueError("KDF parameters must be a JSON object.")
 
-        # Cryptographic field length checks
         if len(salt) != 16:
             raise ValueError(f"Invalid salt length: expected 16, got {len(salt)}.")
         if len(nonce) != 12:
@@ -202,7 +192,6 @@ class SecureVault:
         if len(ciphertext_with_tag) > self.MAX_PAYLOAD_SIZE + 16:  # +16 for GCM tag
             raise ValueError(f"Ciphertext exceeds maximum allowed size ({self.MAX_PAYLOAD_SIZE} bytes).")
 
-        # KDF boundary validations
         ops, mem, p = kdf_params.get("ops"), kdf_params.get("mem"), kdf_params.get("p")
 
         # Strict type check: type(x) is not int excludes booleans (isinstance(True, int) is True)
@@ -217,7 +206,6 @@ class SecureVault:
         if not (self.MIN_KDF_P <= p <= self.MAX_KDF_P):
             raise ValueError("Payload KDF parallelism out of acceptable bounds.")
 
-        # Version-specific key length logic
         if v == "1.0":
             key_len = 32  # Implicit fallback for legacy payloads
         else:
@@ -237,16 +225,14 @@ class SecureVault:
         # PHASE 3: Cryptography
         # ==========================================
         try:
-            # Parameters are explicitly passed; no dictionary .get() logic exists here.
             key = self._derive_key(passphrase, salt, ops, mem, p, key_len)
 
-            # Decrypt and verify tag
             # InvalidTag triggers if: password wrong, ciphertext modified,
             # or any AAD metadata field (v, kdf params, salt, nonce) was tampered.
             aesgcm = AESGCM(key)
             decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, aad)
         except InvalidTag as e:
-            raise PermissionError("Decryption failed: Integrity check failed or incorrect password.") from e
+            raise DecryptionError("Integrity check failed. Incorrect password or tampered data.") from e
         except MemoryError as e:
             raise RuntimeError("Insufficient system memory to perform Argon2 key derivation.") from e
         except Exception as e:
@@ -263,36 +249,6 @@ class SecureVault:
         except UnicodeDecodeError as e:
             raise RuntimeError("Decrypted data is not valid UTF-8. Use return_bytes=True to retrieve raw bytes.") from e
 
-# ==========================================
-# Thread-Safe Smoke Tests & Validation Helpers
-# ==========================================
-def _generate_mock_v1_blob(password: str, plaintext: bytes) -> str:
-    """
-    Structurally constructs a genuine v1.0 blob without mutating class state.
-    Note: This accesses internal APIs (_derive_key, _build_aad_v1) for testing
-    purposes only. It is not part of the public API.
-    """
-    vault = SecureVault()
-    salt, nonce = os.urandom(16), os.urandom(12)
-    s_b64 = base64.b64encode(salt).decode('ascii')
-    n_b64 = base64.b64encode(nonce).decode('ascii')
-
-    ops, mem, p, key_len = 3, 65536, 4, 32
-    key = vault._derive_key(password, salt, ops, mem, p, key_len)
-
-    # Access via the class object directly — descriptor protocol unwraps staticmethod
-    aad = SecureVault._build_aad_v1(ops, mem, p, key_len, s_b64, n_b64)
-    ct = AESGCM(key).encrypt(nonce, plaintext, aad)
-
-    return json.dumps({
-        "header": {
-            "v": "1.0",
-            "kdf": {"ops": ops, "mem": mem, "p": p},  # Implicitly lacks key_len
-            "salt": s_b64,
-            "nonce": n_b64
-        },
-        "ciphertext": base64.b64encode(ct).decode('ascii')
-    })
 
 if __name__ == "__main__":
     vault = SecureVault()
@@ -308,9 +264,4 @@ if __name__ == "__main__":
     secret_bytes = b"\x00\xFF\x00\x11\x22\x33 Binary Payload"
     blob_bytes = vault.encrypt(secret_bytes, password)
     decrypted_bytes = vault.decrypt(blob_bytes, password, return_bytes=True)
-    print(f"Decrypted Bytes Match: {secret_bytes == decrypted_bytes}\n")
-
-    print("--- 3. Legacy v1.0 Decryption Test ---")
-    blob_v1 = _generate_mock_v1_blob(password, b"Legacy data payload")
-    print(f"Constructed v1.0 Blob: {blob_v1[:80]}...")
-    print(f"Decrypted v1.0 Text: {vault.decrypt(blob_v1, password)}")
+    print(f"Decrypted Bytes Match: {secret_bytes == decrypted_bytes}")

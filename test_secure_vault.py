@@ -1,8 +1,41 @@
 import pytest
 import json
 import base64
+from unittest.mock import patch
 from hypothesis import given, strategies as st, settings
-from secure_vault import SecureVault, _generate_mock_v1_blob
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from secure_vault import SecureVault, DecryptionError
+
+# ==========================================
+# Test Helpers
+# ==========================================
+def _generate_mock_v1_blob(password: str, plaintext: bytes) -> str:
+    """
+    Constructs a genuine v1.0 payload without mutating class state.
+    Accesses internal APIs for testing purposes only.
+    """
+    vault = SecureVault()
+    import os, base64, json
+    salt, nonce = os.urandom(16), os.urandom(12)
+    s_b64 = base64.b64encode(salt).decode('ascii')
+    n_b64 = base64.b64encode(nonce).decode('ascii')
+
+    ops, mem, p, key_len = 3, 65536, 4, 32
+    key = vault._derive_key(password, salt, ops, mem, p, key_len)
+
+    # Descriptor protocol unwraps staticmethod when accessed from outside the class body
+    aad = SecureVault._build_aad_v1(ops, mem, p, key_len, s_b64, n_b64)
+    ct = AESGCM(key).encrypt(nonce, plaintext, aad)
+
+    return json.dumps({
+        "header": {
+            "v": "1.0",
+            "kdf": {"ops": ops, "mem": mem, "p": p},  # v1.0 implicitly lacks key_len
+            "salt": s_b64,
+            "nonce": n_b64
+        },
+        "ciphertext": base64.b64encode(ct).decode('ascii')
+    })
 
 # ==========================================
 # Fixtures
@@ -69,8 +102,8 @@ def test_payload_structure(vault, password):
 # ==========================================
 # 3. Authentication & Integrity (Negative Tests)
 # ==========================================
-def test_wrong_password_raises_permission_error(vault, standard_blob):
-    with pytest.raises(PermissionError, match="Integrity check failed"):
+def test_wrong_password_raises_decryption_error(vault, standard_blob):
+    with pytest.raises(DecryptionError, match="Integrity check failed"):
         vault.decrypt(standard_blob, "wrong-password")
 
 def test_tampered_metadata_fails_aad(vault, standard_blob, password):
@@ -78,7 +111,7 @@ def test_tampered_metadata_fails_aad(vault, standard_blob, password):
     payload["header"]["kdf"]["ops"] += 1
     tampered_blob = json.dumps(payload)
 
-    with pytest.raises(PermissionError, match="Integrity check failed"):
+    with pytest.raises(DecryptionError, match="Integrity check failed"):
         vault.decrypt(tampered_blob, password)
 
 def test_tampered_ciphertext_fails_tag(vault, standard_blob, password):
@@ -87,7 +120,7 @@ def test_tampered_ciphertext_fails_tag(vault, standard_blob, password):
     raw_ct[0] ^= 0xFF
     payload["ciphertext"] = base64.b64encode(raw_ct).decode('ascii')
 
-    with pytest.raises(PermissionError, match="Integrity check failed"):
+    with pytest.raises(DecryptionError, match="Integrity check failed"):
         vault.decrypt(json.dumps(payload), password)
 
 def test_v1_blob_rejected_by_v2_aad(vault, password):
@@ -99,7 +132,7 @@ def test_v1_blob_rejected_by_v2_aad(vault, password):
     payload["header"]["v"] = "2.0"
     payload["header"]["kdf"]["key_len"] = 32
 
-    with pytest.raises(PermissionError, match="Integrity check failed"):
+    with pytest.raises(DecryptionError, match="Integrity check failed"):
         vault.decrypt(json.dumps(payload), password)
 
 # ==========================================
@@ -134,7 +167,7 @@ def test_tag_only_ciphertext_fails(vault, password):
     """Proves a 16-byte (tag-only, empty ciphertext) payload is rejected by AES-GCM."""
     payload = json.loads(vault.encrypt("x", password))
     payload["ciphertext"] = base64.b64encode(b"\x00" * 16).decode('ascii')
-    with pytest.raises(PermissionError, match="Integrity check failed"):
+    with pytest.raises(DecryptionError, match="Integrity check failed"):
         vault.decrypt(json.dumps(payload), password)
 
 # ==========================================
@@ -178,6 +211,13 @@ def test_oversized_json_rejected_before_parse_decrypt(vault, password):
     giant_string = "x" * (SecureVault.MAX_JSON_STRING_SIZE + 1)
     with pytest.raises(ValueError, match="exceeds maximum allowed size"):
         vault.decrypt(giant_string, password)
+
+def test_argon2_memory_error_raises_runtime_error(vault, password):
+    """Proves the MemoryError path in Phase 3 surfaces as RuntimeError."""
+    blob = vault.encrypt("x", password)
+    with patch.object(vault, "_derive_key", side_effect=MemoryError):
+        with pytest.raises(RuntimeError, match="Insufficient system memory"):
+            vault.decrypt(blob, password)
 
 # ==========================================
 # 7. Property-Based Fuzz Testing (Hypothesis)
