@@ -4,7 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Secure Vault</title>
-  <script src="https://cdn.jsdelivr.net/npm/argon2-browser@1.18.0/dist/argon2-bundled.min.js"></script>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net blob:; style-src 'unsafe-inline'; connect-src blob:">
+  <script src="https://cdn.jsdelivr.net/npm/argon2-browser@1.18.0/dist/argon2-bundled.min.js"
+          integrity="sha384-XOR3aNvHciLPIf6r+2glkrmbBbLmIJ1EChMXjw8eBKBf8gE0rDq1TyUNuRdorOqi"
+          crossorigin="anonymous"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -360,6 +363,7 @@ function copyOutput(resultId, btn) {
 // Crypto primitives
 // =====================================================================
 const KDF_CONFIG = { ops: 3, mem: 65536, p: 4, key_len: 32 };
+const MAX_PAYLOAD_SIZE = 100 * 1024 * 1024; // 100 MiB — matches Python CLI limit
 
 function toBase64(bytes) {
   let binary = '';
@@ -391,6 +395,10 @@ async function deriveKey(passphrase, saltBytes, ops, mem, p, hashLen) {
 }
 
 async function encrypt(plaintext, passphrase) {
+  const encoded = new TextEncoder().encode(plaintext);
+  if (encoded.length > MAX_PAYLOAD_SIZE)
+    throw new Error(`Plaintext exceeds maximum allowed size (${MAX_PAYLOAD_SIZE} bytes).`);
+
   const salt  = crypto.getRandomValues(new Uint8Array(16));
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const cfg   = KDF_CONFIG;
@@ -420,6 +428,9 @@ async function encrypt(plaintext, passphrase) {
 }
 
 async function decrypt(blob, passphrase) {
+  if (blob.length > MAX_PAYLOAD_SIZE * 2)
+    throw new Error(`Payload input exceeds maximum allowed size (${MAX_PAYLOAD_SIZE * 2} bytes).`);
+
   let packet;
   try { packet = JSON.parse(blob); } catch { throw new Error('Not valid JSON. Paste the full encrypted payload.'); }
 

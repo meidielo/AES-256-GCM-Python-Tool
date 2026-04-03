@@ -354,17 +354,26 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    passphrase = getpass.getpass("Passphrase: ")
-    if not passphrase:
-        print("Error: passphrase cannot be empty.", file=sys.stderr)
-        sys.exit(1)
-
-    vault = SecureVault()
     try:
+        passphrase = getpass.getpass("Passphrase: ")
+        if not passphrase:
+            print("Error: passphrase cannot be empty.", file=sys.stderr)
+            sys.exit(1)
+
+        if args.command == "encrypt":
+            confirm = getpass.getpass("Confirm passphrase: ")
+            if passphrase != confirm:
+                print("Error: passphrases do not match.", file=sys.stderr)
+                sys.exit(1)
+
+        vault = SecureVault()
         if args.command == "encrypt":
             _cli_encrypt(args, vault, passphrase)
         elif args.command == "decrypt":
             _cli_decrypt(args, vault, passphrase)
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        sys.exit(130)
     except (ValueError, TypeError, DecryptionError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

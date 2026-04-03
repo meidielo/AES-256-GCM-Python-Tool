@@ -1,3 +1,4 @@
+import os
 import pytest
 import json
 import base64
@@ -15,7 +16,6 @@ def _generate_mock_v1_blob(password: str, plaintext: bytes) -> str:
     Accesses internal APIs for testing purposes only.
     """
     vault = SecureVault()
-    import os, base64, json
     salt, nonce = os.urandom(16), os.urandom(12)
     s_b64 = base64.b64encode(salt).decode('ascii')
     n_b64 = base64.b64encode(nonce).decode('ascii')

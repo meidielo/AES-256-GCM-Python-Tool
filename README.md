@@ -81,14 +81,16 @@ Alternatively, double-click `index.html` in File Explorer or run `start index.ht
 
 - **Encrypt tab** — type a message, enter a passphrase, copy the encrypted blob
 - **Decrypt tab** — paste a blob, enter the passphrase, read the original message
-- Runs entirely client-side via the [WebCrypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) and [argon2-browser](https://github.com/nicktindall/argon2-browser) (loaded from CDN)
+- Runs entirely client-side via the [WebCrypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) and [argon2-browser](https://github.com/nicktindall/argon2-browser) (loaded from CDN with [SRI](https://developer.mozilla.org/en-US/docs/Web/Security/Subresource_Integrity) verification)
+- Content Security Policy restricts script execution to trusted sources
+- Payload size limits match the Python CLI (100 MiB)
 - Blobs are **fully interchangeable** with the CLI — encrypt in the browser, decrypt with Python, and vice versa
 - Limitation: binary payloads and file encryption require the CLI
 
 ## CLI Usage
 
 ```bash
-# Encrypt a file (passphrase prompted securely via stdin)
+# Encrypt a file (passphrase prompted securely via stdin, with confirmation)
 python -m secure_vault encrypt --file secret.txt --out secret.enc
 
 # Encrypt inline text
@@ -100,6 +102,8 @@ python -m secure_vault decrypt --file secret.enc
 # Decrypt binary payload to file
 python -m secure_vault decrypt --file secret.enc --out recovered.bin --bytes
 ```
+
+On encrypt, the CLI prompts for the passphrase twice to prevent typos. Ctrl+C exits cleanly at any prompt.
 
 ## Library Usage
 
