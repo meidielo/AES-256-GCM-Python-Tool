@@ -39,7 +39,7 @@ dev = [
 secure-vault = "secure_vault:main"
 
 [project.urls]
-Repository = "https://github.com/Pongo/aes-secure-vault"
+Repository = "https://github.com/meidielo/AES-256-GCM-Python-Tool"
 
 [tool.hatch.build.targets.wheel]
 only-include = ["secure_vault.py", "py.typed"]
