@@ -5,9 +5,13 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
+*.egg
 dist/
 build/
-*.egg
+
+# Packaging
+*.whl
+*.tar.gz
 
 # Virtual environments
 .venv/

@@ -1,3 +1,5 @@
+__version__ = "1.0.0"
+
 import argparse
 import getpass
 import os
@@ -327,7 +329,7 @@ def _cli_decrypt(args: argparse.Namespace, vault: SecureVault, passphrase: str) 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m secure_vault",
+        prog="secure-vault",
         description="AES-256-GCM encryption vault with Argon2id key derivation."
     )
     sub = parser.add_subparsers(dest="command", required=True)

@@ -58,13 +58,18 @@ New payloads are always written as v2.0. v1.0 payloads can be decrypted without 
 
 **Python CLI / library:**
 - Python 3.8+
-- Runtime: `cryptography>=44.0.0` — see [requirements.txt](requirements.txt)
-- Development: `pytest>=7.0.0`, `hypothesis>=6.0.0` — see [requirements-dev.txt](requirements-dev.txt)
+- `cryptography>=44.0.0` (installed automatically)
 
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+pip install aes-secure-vault
+```
+
+For development (includes pytest and Hypothesis):
+
+```bash
+pip install aes-secure-vault[dev]
 ```
 
 ## Web UI
@@ -91,17 +96,19 @@ Alternatively, double-click `index.html` in File Explorer or run `start index.ht
 
 ```bash
 # Encrypt a file (passphrase prompted securely via stdin, with confirmation)
-python -m secure_vault encrypt --file secret.txt --out secret.enc
+secure-vault encrypt --file secret.txt --out secret.enc
 
 # Encrypt inline text
-python -m secure_vault encrypt --text "my secret data" --out secret.enc
+secure-vault encrypt --text "my secret data" --out secret.enc
 
 # Decrypt to stdout
-python -m secure_vault decrypt --file secret.enc
+secure-vault decrypt --file secret.enc
 
 # Decrypt binary payload to file
-python -m secure_vault decrypt --file secret.enc --out recovered.bin --bytes
+secure-vault decrypt --file secret.enc --out recovered.bin --bytes
 ```
+
+`python -m secure_vault` also works as an alternative to `secure-vault`.
 
 On encrypt, the CLI prompts for the passphrase twice to prevent typos. Ctrl+C exits cleanly at any prompt.
 
