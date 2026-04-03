@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aes-secure-vault"
-version = "1.0.0"
+version = "1.0.1"
 description = "AES-256-GCM encryption with Argon2id key derivation. Self-contained JSON payloads, no shared state."
 readme = "README.md"
 license = "MIT"
