@@ -4,6 +4,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/aes-secure-vault)](https://pypi.org/project/aes-secure-vault/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+> AES-256-GCM authenticated encryption with Argon2id key derivation. Self-contained JSON payloads. Published on PyPI.
+
 A symmetric encryption module implementing AES-256-GCM with Argon2id key derivation, following established envelope encryption patterns (similar to JWE/Fernet). Payloads are self-contained JSON blobs — no shared state or config files required to decrypt.
 
 Built to understand authenticated encryption, KDF parameter binding, and defensive input validation from first principles rather than wrapping a high-level library.
