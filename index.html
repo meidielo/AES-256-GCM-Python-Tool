@@ -53,6 +53,55 @@
       line-height: 1.5;
     }
 
+    .about {
+      padding: 20px 32px;
+      border-bottom: 1px solid #e8eaed;
+      background: #fafbff;
+    }
+    .about-label {
+      color: #4f46e5;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .about h2 {
+      color: #1a1a2e;
+      font-size: 1rem;
+      line-height: 1.35;
+      margin-bottom: 8px;
+    }
+    .about p {
+      color: #555;
+      font-size: 0.84rem;
+      line-height: 1.55;
+      margin-bottom: 12px;
+    }
+    .about-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .about-grid div {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+    }
+    .about-grid strong {
+      display: block;
+      color: #1a1a2e;
+      font-size: 0.78rem;
+      margin-bottom: 5px;
+    }
+    .about-grid span {
+      color: #666;
+      display: block;
+      font-size: 0.73rem;
+      line-height: 1.45;
+    }
+
     /* ── Tabs ── */
     .tabs {
       display: flex;
@@ -224,6 +273,10 @@
       gap: 6px;
     }
     .footer svg { flex-shrink: 0; }
+
+    @media (max-width: 640px) {
+      .about-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -240,6 +293,22 @@
     </h1>
     <p>AES-256-GCM encryption with Argon2id key derivation. Runs entirely in your browser — nothing is sent anywhere.</p>
   </div>
+
+  <section class="about" aria-labelledby="about-vault-title">
+    <div class="about-label">About this project</div>
+    <h2 id="about-vault-title">A compact authenticated-encryption tool with explicit security boundaries.</h2>
+    <p>
+      AES Secure Vault is a Python package, CLI, and browser UI for practicing
+      defensive crypto API design. It produces self-contained JSON payloads
+      using AES-256-GCM, Argon2id, random salt and nonce values, and AAD-bound
+      envelope metadata.
+    </p>
+    <div class="about-grid" aria-label="AES Secure Vault project details">
+      <div><strong>Protects</strong><span>Confidentiality at rest, ciphertext tampering detection, metadata tampering detection, and KDF downgrade resistance.</span></div>
+      <div><strong>Interop</strong><span>Browser encrypted blobs are compatible with the Python CLI and library, so the same payload format can be reviewed both ways.</span></div>
+      <div><strong>Limits</strong><span>Passphrase strength, memory scraping, side channels, and key rotation remain outside the tool boundary.</span></div>
+    </div>
+  </section>
 
   <!-- Tabs -->
   <div class="tabs">
