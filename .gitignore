@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -38,3 +38,12 @@ env/
 # Claude Code
 .claude/
 AGENTS.md.before-codex-memory-import-*
+
+# Local agent/Codex artifacts
+/AGENTS.md
+/AGENTS.md.before-codex-memory-import-*
+/CLAUDE.md
+/CONTEXT.md
+/MEMORY.md
+/.codex/
+
