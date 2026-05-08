@@ -94,6 +94,13 @@ For development (includes pytest and Hypothesis):
 pip install aes-secure-vault[dev]
 ```
 
+From a source checkout, the equivalent requirements files are also available:
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+```
+
 ## Web UI
 
 The recommended way to open it:

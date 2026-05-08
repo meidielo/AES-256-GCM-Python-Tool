@@ -37,3 +37,4 @@ env/
 
 # Claude Code
 .claude/
+AGENTS.md.before-codex-memory-import-*

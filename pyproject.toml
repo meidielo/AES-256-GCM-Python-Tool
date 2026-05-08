@@ -52,6 +52,8 @@ include = [
     "index.html",
     "tools/benchmark_memory_profile.py",
     "README.md",
+    "requirements.txt",
+    "requirements-dev.txt",
     "LICENSE",
     "pyproject.toml",
 ]
