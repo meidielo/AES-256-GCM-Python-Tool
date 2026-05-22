@@ -670,8 +670,8 @@ def _write_temp_then_replace(out_path: str, writer: Callable[[BinaryIO], dict[st
     except Exception:
         try:
             os.remove(temp_path)
-        except OSError:
-            pass
+        except OSError as cleanup_error:
+            print(f"Warning: could not remove temporary output file {temp_path}: {cleanup_error}", file=sys.stderr)
         raise
 
 

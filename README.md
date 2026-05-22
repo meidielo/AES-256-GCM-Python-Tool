@@ -74,6 +74,16 @@ The benchmark reports Python allocation peaks for single-shot versus streaming m
 
 New single-shot payloads are written as v2.0. v1.0 payloads can be decrypted without any migration step. Streaming payloads are separate `stream-1.0` line-delimited JSON files and are intentionally not interchangeable with the browser UI or single-shot JSON blobs.
 
+## Release Provenance and SBOM
+
+Release builds can publish three review artifacts: a CycloneDX SBOM, a SHA-256 checksum manifest, and an unsigned local provenance statement tied to the git commit and tag. Generate them with:
+
+```bash
+python tools/generate_release_artifacts.py
+```
+
+For tagged releases, follow [docs/release-provenance.md](docs/release-provenance.md). These artifacts improve supply-chain transparency only; they do not make this educational tool production vault software.
+
 ## Requirements
 
 **Web UI:** A modern browser. No install.

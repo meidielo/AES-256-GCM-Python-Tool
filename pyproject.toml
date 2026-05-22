@@ -31,6 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2.2",
     "pytest>=7.0.0",
     "hypothesis>=6.0.0",
 ]
@@ -51,6 +52,8 @@ include = [
     "test_secure_vault.py",
     "index.html",
     "tools/benchmark_memory_profile.py",
+    "tools/generate_release_artifacts.py",
+    "docs/release-provenance.md",
     "README.md",
     "requirements.txt",
     "requirements-dev.txt",
