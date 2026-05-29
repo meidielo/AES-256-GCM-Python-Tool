@@ -40,7 +40,8 @@ dev = [
 secure-vault = "secure_vault:main"
 
 [project.urls]
-Repository = "https://github.com/meidielo/AES-256-GCM-Python-Tool"
+Repository = "https://github.com/MDP-Studio/AES-256-GCM-Python-Tool"
+ReleaseProvenance = "https://github.com/MDP-Studio/AES-256-GCM-Python-Tool/releases"
 
 [tool.hatch.build.targets.wheel]
 only-include = ["secure_vault.py", "py.typed"]
@@ -50,6 +51,7 @@ include = [
     "secure_vault.py",
     "py.typed",
     "test_secure_vault.py",
+    "test_release_workflow.py",
     "index.html",
     "tools/benchmark_memory_profile.py",
     "tools/generate_release_artifacts.py",

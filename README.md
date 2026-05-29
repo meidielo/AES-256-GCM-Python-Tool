@@ -84,6 +84,10 @@ python tools/generate_release_artifacts.py
 
 For tagged releases, follow [docs/release-provenance.md](docs/release-provenance.md). These artifacts improve supply-chain transparency only; they do not make this educational tool production vault software.
 
+The GitHub Actions release workflow builds and tests tagged releases, uploads distribution and transparency files to the matching GitHub release, and creates GitHub artifact attestations. PyPI upload is gated behind a manual `workflow_dispatch` run from a `v*` tag and requires the GitHub `pypi` environment plus a matching PyPI Trusted Publisher. The workflow uses tokenless Trusted Publishing only; no long-lived PyPI API token is expected.
+
+GitHub and PyPI attestations are supply-chain evidence for the packaged files, not production cryptography certification.
+
 ## Requirements
 
 **Web UI:** A modern browser. No install.
@@ -212,7 +216,7 @@ The encrypted blob is a JSON string safe to store or transmit:
 
 ```bash
 # Full suite (includes Hypothesis fuzz tests — may take a few minutes)
-pytest test_secure_vault.py -v
+pytest test_secure_vault.py test_release_workflow.py -v
 
 # Skip slow fuzz tests
 pytest test_secure_vault.py -v -k "not arbitrary"
