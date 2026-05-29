@@ -107,16 +107,7 @@ jobs:
           if [[ -n "${tag}" ]]; then
             release_id="${tag}"
           else
-            version="$(python - <<'PY'
-import re
-from pathlib import Path
-text = Path('pyproject.toml').read_text(encoding='utf-8')
-match = re.search(r'^version\s*=\s*"([^"]+)"', text, flags=re.MULTILINE)
-if not match:
-    raise SystemExit('pyproject.toml is missing project.version')
-print(match.group(1))
-PY
-)"
+            version="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
             release_id="${version}-$(git rev-parse --short HEAD)"
           fi
           test -d "release-artifacts/${release_id}"
@@ -151,10 +142,10 @@ PY
         run: |
           notes="$(mktemp)"
           cat > "${notes}" <<'EOF'
-This release publishes Python distribution files plus SBOM, checksum, and local provenance artifacts for reviewability.
+          This release publishes Python distribution files plus SBOM, checksum, and local provenance artifacts for reviewability.
 
-AES Secure Vault remains an educational authenticated-encryption tool. These release artifacts and GitHub attestations are supply-chain transparency evidence, not production cryptography certification.
-EOF
+          AES Secure Vault remains an educational authenticated-encryption tool. These release artifacts and GitHub attestations are supply-chain transparency evidence, not production cryptography certification.
+          EOF
           assets=(dist/* release-artifacts/${RELEASE_ID}/*)
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
